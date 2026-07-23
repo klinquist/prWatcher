@@ -195,6 +195,35 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         !wasReady && isReadyToMerge
     }
 
+    public var mergeWhenReadyBlockerDescription: String? {
+        guard !isReadyToMerge else { return nil }
+        if state == "MERGED" || mergedAt != nil { return "already merged" }
+        if state == "CLOSED" { return "pull request is closed" }
+        if isDraft { return "still a draft" }
+        if mergeable == "CONFLICTING" { return "merge conflicts must be resolved" }
+
+        switch PRClassifier.blockingCIState(
+            rollupState: ciState,
+            mergeStateStatus: mergeStateStatus
+        ) {
+        case "FAILURE", "ERROR":
+            return "required CI is failing"
+        case "PENDING", "EXPECTED":
+            return "waiting for required CI"
+        default:
+            break
+        }
+
+        switch reviewDecision {
+        case "CHANGES_REQUESTED":
+            return "changes were requested"
+        case "APPROVED":
+            return "GitHub does not currently report the pull request as merge-ready"
+        default:
+            return "waiting for approval"
+        }
+    }
+
     public var asWatched: PullRequest {
         PullRequest(
             id: id,

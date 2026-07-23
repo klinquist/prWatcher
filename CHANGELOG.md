@@ -4,6 +4,19 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-23
+
+### Changed
+
+- Check armed Merge When Ready pull requests immediately after the Mac wakes when automatic polling is eligible.
+- Attempt an armed automatic merge whenever the latest completed poll reports the PR ready, preventing stale transition state from stranding it.
+
+### Fixed
+
+- Log Merge When Ready decisions on every completed poll, including specific approval, CI, draft, conflict, permission, and status-fetch blockers.
+- Log automatic merge attempts, successes, failures, cancellations, and removal of completed registrations.
+- Distinguish actual Mac sleep and wake events from the locked-session polling schedule in the refresh log.
+
 ## [0.6.1] - 2026-07-23
 
 ### Changed

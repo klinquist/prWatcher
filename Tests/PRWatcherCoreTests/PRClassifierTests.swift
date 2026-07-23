@@ -119,7 +119,61 @@ func watchedMergeReadiness() throws {
     #expect(pullRequest.isReadyToMerge)
     #expect(pullRequest.becameReadyToMerge(wasReady: false))
     #expect(!pullRequest.becameReadyToMerge(wasReady: true))
+    #expect(pullRequest.mergeWhenReadyBlockerDescription == nil)
     #expect(pullRequest.stateDetail == "Approved")
+}
+
+@Test("Merge When Ready explains why a pull request is blocked")
+func mergeWhenReadyBlockerDescriptions() throws {
+    let baseURL = try #require(URL(string: "https://github.com/acme/widgets/pull/123"))
+    func pullRequest(
+        isDraft: Bool = false,
+        ciState: String? = "SUCCESS",
+        reviewDecision: String? = "APPROVED",
+        mergeable: String? = "MERGEABLE",
+        mergeStateStatus: String? = nil
+    ) -> PullRequest {
+        PullRequest(
+            id: UUID().uuidString,
+            number: 123,
+            title: "Blocked change",
+            url: baseURL,
+            repository: "acme/widgets",
+            author: "octocat",
+            isDraft: isDraft,
+            mergedAt: nil,
+            updatedAt: Date(),
+            reviewDecision: reviewDecision,
+            ciState: ciState,
+            mergeable: mergeable,
+            mergeStateStatus: mergeStateStatus,
+            state: "OPEN",
+            assignment: nil,
+            section: .watched
+        )
+    }
+
+    #expect(pullRequest(isDraft: true).mergeWhenReadyBlockerDescription == "still a draft")
+    #expect(
+        pullRequest(ciState: "PENDING", mergeStateStatus: "BLOCKED")
+            .mergeWhenReadyBlockerDescription == "waiting for required CI"
+    )
+    #expect(
+        pullRequest(ciState: "FAILURE", mergeStateStatus: "BLOCKED")
+            .mergeWhenReadyBlockerDescription == "required CI is failing"
+    )
+    #expect(
+        pullRequest(reviewDecision: "REVIEW_REQUIRED")
+            .mergeWhenReadyBlockerDescription == "waiting for approval"
+    )
+    #expect(
+        pullRequest(reviewDecision: "CHANGES_REQUESTED")
+            .mergeWhenReadyBlockerDescription == "changes were requested"
+    )
+    #expect(
+        pullRequest(mergeable: "CONFLICTING")
+            .mergeWhenReadyBlockerDescription == "merge conflicts must be resolved"
+    )
 }
 
 @Test("A PR can move into Watched without losing its status or permissions")

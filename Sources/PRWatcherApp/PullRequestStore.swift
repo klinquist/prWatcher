@@ -231,6 +231,24 @@ final class PullRequestStore: ObservableObject {
                     self?.sessionActivityDidChange(isInactive: false)
                 }
             },
+            notificationCenter.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.systemWillSleep()
+                }
+            },
+            notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.systemDidWake()
+                }
+            },
         ]
     }
 
@@ -264,6 +282,32 @@ final class PullRequestStore: ObservableObject {
                 ? "Mac locked or user session inactive. Automatic polling is \(scheduleDescription)."
                 : "User session active. Automatic polling is \(scheduleDescription)."
         ))
+    }
+
+    private func systemWillSleep() {
+        appendRefreshLog(PRRefreshLogEvent(
+            level: .info,
+            message: "Mac is going to sleep. prWatcher cannot poll or auto-merge until the Mac wakes."
+        ))
+    }
+
+    private func systemDidWake() {
+        appendRefreshLog(PRRefreshLogEvent(
+            level: .info,
+            message: "Mac woke from sleep. Resuming eligible automatic polling."
+        ))
+        configurePolling()
+        guard activePollingIntervalMinutes != nil else {
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .info,
+                message: "Automatic polling remains paused under the current locked or active schedule."
+            ))
+            return
+        }
+        Task {
+            await performAutomaticRefresh()
+            configurePolling()
+        }
     }
 
     private func networkStatusDidChange(isOnline: Bool) {
@@ -930,11 +974,19 @@ final class PullRequestStore: ObservableObject {
             wasReady: false
         )
         saveMergeWhenReadyRegistrations()
+        appendRefreshLog(PRRefreshLogEvent(
+            level: .info,
+            message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): enabled. Will merge automatically after a poll reports that approvals and required CI are ready."
+        ))
     }
 
     func cancelMergeWhenReady(_ pullRequest: PullRequest) {
         guard mergeWhenReadyRegistrations.removeValue(forKey: pullRequest.id) != nil else { return }
         saveMergeWhenReadyRegistrations()
+        appendRefreshLog(PRRefreshLogEvent(
+            level: .info,
+            message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): canceled."
+        ))
     }
 
     func copyLink(_ pullRequest: PullRequest) {
@@ -1069,37 +1121,78 @@ final class PullRequestStore: ObservableObject {
                     candidatesByID[pullRequest.id] = pullRequest
                 }
             }
-            guard let pullRequest else { continue }
+            guard let pullRequest else {
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .warning,
+                    message: "Merge When Ready — \(mergeWhenReadyLabel(for: originalRegistration)): could not load the current PR status. Will try again at the next poll."
+                ))
+                continue
+            }
+            let label = mergeWhenReadyLabel(for: pullRequest)
 
             if pullRequest.state == "CLOSED" || pullRequest.state == "MERGED" || pullRequest.mergedAt != nil {
                 mergeWhenReadyRegistrations.removeValue(forKey: originalRegistration.pullRequestID)
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .info,
+                    message: "Merge When Ready — \(label): \(pullRequest.state == "CLOSED" ? "the PR was closed" : "the PR was already merged"). Automatic merge monitoring was removed."
+                ))
                 continue
             }
 
             guard pullRequest.viewerCanMerge else {
                 mergeWhenReadyRegistrations.removeValue(forKey: originalRegistration.pullRequestID)
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .warning,
+                    message: "Merge When Ready — \(label): merge permission is no longer available. Automatic merge monitoring was removed."
+                ))
                 continue
             }
 
             guard var currentRegistration = mergeWhenReadyRegistrations[originalRegistration.pullRequestID] else {
                 continue
             }
-            let shouldMerge = pullRequest.becameReadyToMerge(wasReady: currentRegistration.wasReady)
             currentRegistration.wasReady = pullRequest.isReadyToMerge
             mergeWhenReadyRegistrations[originalRegistration.pullRequestID] = currentRegistration
-            guard shouldMerge,
-                  mergeWhenReadyInFlight.insert(originalRegistration.pullRequestID).inserted else { continue }
+            guard pullRequest.isReadyToMerge else {
+                let reason = pullRequest.mergeWhenReadyBlockerDescription
+                    ?? "GitHub does not currently report the pull request as merge-ready"
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .info,
+                    message: "Merge When Ready — \(label): will merge automatically; not ready yet (\(reason))."
+                ))
+                continue
+            }
+            guard mergeWhenReadyInFlight.insert(originalRegistration.pullRequestID).inserted else {
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .info,
+                    message: "Merge When Ready — \(label): an automatic merge attempt is already in progress."
+                ))
+                continue
+            }
+
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .info,
+                message: "Merge When Ready — \(label): ready now. Will merge automatically; attempting merge."
+            ))
 
             do {
                 try await client.merge(pullRequest)
                 mergeWhenReadyRegistrations.removeValue(forKey: originalRegistration.pullRequestID)
                 outcome.mergedPullRequests.append(pullRequest.asMerged())
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .success,
+                    message: "Merge When Ready — \(label): automatic merge succeeded."
+                ))
                 await notifyAutoMerge(of: pullRequest)
             } catch {
                 if var currentRegistration = mergeWhenReadyRegistrations[originalRegistration.pullRequestID] {
                     currentRegistration.wasReady = false
                     mergeWhenReadyRegistrations[originalRegistration.pullRequestID] = currentRegistration
                 }
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .error,
+                    message: "Merge When Ready — \(label): automatic merge failed: \(error.localizedDescription). Will retry after a future poll reports the PR ready."
+                ))
                 outcome.errors.append("Could not auto-merge \(pullRequest.repository)#\(pullRequest.number): \(error.localizedDescription)")
             }
             mergeWhenReadyInFlight.remove(originalRegistration.pullRequestID)
@@ -1107,6 +1200,17 @@ final class PullRequestStore: ObservableObject {
 
         saveMergeWhenReadyRegistrations()
         return outcome
+    }
+
+    private func mergeWhenReadyLabel(for pullRequest: PullRequest) -> String {
+        "\(pullRequest.repository)#\(pullRequest.number)"
+    }
+
+    private func mergeWhenReadyLabel(for registration: MergeWhenReadyRegistration) -> String {
+        guard let reference = GitHubPullRequestReference(url: registration.url) else {
+            return registration.url.absoluteString
+        }
+        return "\(reference.owner)/\(reference.repository)#\(reference.number)"
     }
 
     private func notifyAutoMerge(of pullRequest: PullRequest) async {
