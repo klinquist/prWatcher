@@ -6,7 +6,7 @@
 
 prWatcher is a compact native macOS dashboard for the GitHub pull requests that need your attention. It lives comfortably in a corner of the display, talks to GitHub through your existing `gh` CLI login, and keeps useful results visible even when GitHub—or your network—is unavailable.
 
-Current version: **0.6.0**
+Current version: **0.6.1**
 
 Created by **Kristopher Linquist**.
 

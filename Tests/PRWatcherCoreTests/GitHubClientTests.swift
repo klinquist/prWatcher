@@ -2,6 +2,74 @@ import Foundation
 import Testing
 @testable import PRWatcherCore
 
+@Test("Command runner drains output larger than a process pipe")
+func commandRunnerDrainsLargeOutput() throws {
+    let data = try GitHubClient.run(
+        executableURL: URL(fileURLWithPath: "/usr/bin/awk"),
+        arguments: ["BEGIN { for (i = 0; i < 262144; i++) printf \"x\" }"],
+        timeout: 5
+    )
+    #expect(data.count == 262_144)
+}
+
+@Test("Command runner times out instead of hanging indefinitely")
+func commandRunnerTimeout() {
+    #expect(throws: GitHubClientError.self) {
+        try GitHubClient.run(
+            executableURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: ["2"],
+            timeout: 0.1
+        )
+    }
+}
+
+@Test("Independent GraphQL batches run with bounded parallelism")
+func graphQLBatchesRunConcurrently() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("prwatcher-concurrency-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let executable = directory.appendingPathComponent("fake-gh")
+    try """
+    #!/bin/sh
+    sleep 0.15
+    printf '{}'
+    """.write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: executable.path
+    )
+
+    let batches = (1...6).map { ["PR_\($0)"] }
+    let serialStartedAt = Date()
+    _ = try GitHubClient.fetchNodeBatchData(
+        executableURL: executable,
+        batches: batches,
+        query: "query Test($ids: [ID!]!) { nodes(ids: $ids) { id } }",
+        logLabel: "Test",
+        phase: "serial test",
+        maximumConcurrentRequests: 1,
+        onLog: nil
+    )
+    let serialElapsed = Date().timeIntervalSince(serialStartedAt)
+
+    let parallelStartedAt = Date()
+    let parallelResults = try GitHubClient.fetchNodeBatchData(
+        executableURL: executable,
+        batches: batches,
+        query: "query Test($ids: [ID!]!) { nodes(ids: $ids) { id } }",
+        logLabel: "Test",
+        phase: "test",
+        maximumConcurrentRequests: 3,
+        onLog: nil
+    )
+    let parallelElapsed = Date().timeIntervalSince(parallelStartedAt)
+
+    #expect(parallelResults.count == batches.count)
+    #expect(parallelElapsed < serialElapsed * 0.8)
+}
+
 @Test("GraphQL results are de-duplicated and assigned through a team")
 func decodeSnapshot() throws {
     let json = #"""

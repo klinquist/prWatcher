@@ -4,6 +4,19 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-23
+
+### Changed
+
+- Run independent GraphQL classification and hydration batches with bounded three-request parallelism.
+- Spread large direct-review reconciliations across refreshes in batches of at most 100 candidates.
+- Report per-batch reconciliation progress in the refresh log.
+
+### Fixed
+
+- Prevent large GitHub CLI responses from deadlocking when they exceed the process pipe buffer.
+- Stop an unresponsive GitHub CLI request after 30 seconds instead of allowing refresh to hang indefinitely.
+
 ## [0.6.0] - 2026-07-23
 
 ### Added

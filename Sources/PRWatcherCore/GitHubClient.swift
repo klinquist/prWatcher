@@ -1,10 +1,71 @@
+import Darwin
 import Foundation
+
+private final class ProcessPipeCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var collectedData = Data()
+
+    func append(_ data: Data) {
+        lock.lock()
+        collectedData.append(data)
+        lock.unlock()
+    }
+
+    func data() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return collectedData
+    }
+}
+
+private final class ConcurrentBatchResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [Data?]
+    private var firstError: Error?
+
+    init(count: Int) {
+        results = Array(repeating: nil, count: count)
+    }
+
+    var hasError: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstError != nil
+    }
+
+    func record(_ data: Data, at index: Int) {
+        lock.lock()
+        results[index] = data
+        lock.unlock()
+    }
+
+    func record(_ error: Error) {
+        lock.lock()
+        if firstError == nil {
+            firstError = error
+        }
+        lock.unlock()
+    }
+
+    func resolved() throws -> [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        if let firstError {
+            throw firstError
+        }
+        guard results.allSatisfy({ $0 != nil }) else {
+            throw GitHubClientError.invalidResponse("a concurrent GitHub request did not complete")
+        }
+        return results.compactMap { $0 }
+    }
+}
 
 private final class DirectReviewRequestCache: @unchecked Sendable {
     struct Entry {
         var pullRequestIDs: [String]
         var lastScanAt: Date
         var lastFullReconciliationAt: Date
+        var reconciliationNextPage: Int?
     }
 
     private let lock = NSLock()
@@ -833,7 +894,7 @@ public struct GitHubClient: Sendable {
             return (
                 hydrated.viewer.isEmpty ? viewerLogin : hydrated.viewer,
                 hydrated.nodes,
-                result.totalCount > result.ids.count,
+                result.nextPage != nil,
                 nil
             )
         }
@@ -841,7 +902,8 @@ public struct GitHubClient: Sendable {
         let now = Date()
         let cacheKey = "\(viewerLogin.lowercased())|\(organizationQualifier.lowercased())"
         let cached = cache.entry(for: cacheKey)
-        let needsFullReconciliation = cached.map {
+        let reconciliationPage = cached?.reconciliationNextPage ?? 1
+        let needsFullReconciliation = cached?.reconciliationNextPage != nil || cached.map {
             now.timeIntervalSince($0.lastFullReconciliationAt) >= 60 * 60
         } ?? true
 
@@ -867,19 +929,28 @@ public struct GitHubClient: Sendable {
             scanQualifier = "updated:>=\(ISO8601DateFormatter().string(from: overlapDate))"
         }
 
-        let scanKind = needsFullReconciliation ? "full reconciliation" : "incremental scan"
+        let scanKind = needsFullReconciliation
+            ? "reconciliation batch \(reconciliationPage)"
+            : "incremental scan"
         onLog?(PRRefreshLogEvent(
             level: .info,
             message: "Refreshing \(logLabel) with a \(scanKind)…"
         ))
 
-        let searchResult: (ids: [String], totalCount: Int, incomplete: Bool)
+        let searchResult: (
+            ids: [String],
+            totalCount: Int,
+            incomplete: Bool,
+            nextPage: Int?
+        )
         do {
             searchResult = try fetchPullRequestSearchCandidateIDs(
                 executableURL: executableURL,
                 query: "\(baseQuery) \(scanQualifier) sort:updated-desc",
-                maximumCount: needsFullReconciliation ? 1_000 : 200,
+                maximumCount: needsFullReconciliation ? 100 : 200,
                 pageSize: 100,
+                startingPage: needsFullReconciliation ? reconciliationPage : 1,
+                maximumPages: needsFullReconciliation ? 1 : 2,
                 logLabel: logLabel,
                 onLog: onLog
             )
@@ -909,21 +980,27 @@ public struct GitHubClient: Sendable {
             viewerLogin: viewerLogin
         )
 
-        var combinedIDs = needsFullReconciliation ? scannedDirectIDs : scannedDirectIDs + retainedDirectIDs
+        var combinedIDs = scannedDirectIDs + retainedDirectIDs
         var seen = Set<String>()
         combinedIDs = combinedIDs.filter { seen.insert($0).inserted }
-        let scanWasCapped = searchResult.incomplete || searchResult.totalCount > searchResult.ids.count
+        let scanWasCapped = searchResult.incomplete || searchResult.nextPage != nil
+        let reconciliationContinues = needsFullReconciliation && searchResult.nextPage != nil
         let forceFullReconciliationNextTime = !needsFullReconciliation && scanWasCapped
 
         cache.set(
             DirectReviewRequestCache.Entry(
                 pullRequestIDs: combinedIDs,
                 lastScanAt: now,
-                lastFullReconciliationAt: forceFullReconciliationNextTime
+                lastFullReconciliationAt: forceFullReconciliationNextTime || reconciliationContinues
                     ? .distantPast
                     : needsFullReconciliation
                     ? now
-                    : (cached?.lastFullReconciliationAt ?? now)
+                    : (cached?.lastFullReconciliationAt ?? now),
+                reconciliationNextPage: reconciliationContinues
+                    ? searchResult.nextPage
+                    : forceFullReconciliationNextTime
+                    ? 1
+                    : nil
             ),
             for: cacheKey
         )
@@ -931,10 +1008,12 @@ public struct GitHubClient: Sendable {
         let classifiedCount = scannedCandidates.nodes.count
         let nonDirectCount = max(classifiedCount - scannedDirectIDs.count, 0)
         let incompleteSuffix: String
-        if forceFullReconciliationNextTime {
-            incompleteSuffix = " Candidate results were capped; a full reconciliation will run at the next refresh."
-        } else if scanWasCapped {
-            incompleteSuffix = " Candidate results were capped; another full reconciliation will run in one hour."
+        if reconciliationContinues {
+            incompleteSuffix = " Remaining candidates will be reconciled during upcoming refreshes."
+        } else if forceFullReconciliationNextTime {
+            incompleteSuffix = " Candidate results were capped; reconciliation will resume at the next refresh."
+        } else if searchResult.incomplete {
+            incompleteSuffix = " GitHub marked the search results incomplete; reconciliation will run again in one hour."
         } else {
             incompleteSuffix = ""
         }
@@ -963,14 +1042,18 @@ public struct GitHubClient: Sendable {
         query: String,
         maximumCount: Int,
         pageSize: Int,
+        startingPage: Int = 1,
+        maximumPages: Int? = nil,
         logLabel: String,
         onLog: (@Sendable (PRRefreshLogEvent) -> Void)?
-    ) throws -> (ids: [String], totalCount: Int, incomplete: Bool) {
+    ) throws -> (ids: [String], totalCount: Int, incomplete: Bool, nextPage: Int?) {
         var ids: [String] = []
         var seen = Set<String>()
-        var page = 1
+        var page = max(startingPage, 1)
+        var processedPages = 0
         var totalCount = 0
         var incomplete = false
+        var nextPage: Int?
         let boundedPageSize = min(max(pageSize, 1), 100)
 
         while ids.count < maximumCount {
@@ -994,6 +1077,7 @@ public struct GitHubClient: Sendable {
             let response = try decodePullRequestSearchCandidates(data)
             totalCount = response.totalCount
             incomplete = incomplete || response.incompleteResults
+            processedPages += 1
             for item in response.items where ids.count < maximumCount {
                 if seen.insert(item.nodeID).inserted {
                     ids.append(item.nodeID)
@@ -1003,12 +1087,17 @@ public struct GitHubClient: Sendable {
                 level: .info,
                 message: "\(logLabel) — candidates page \(currentPage): received \(response.items.count)."
             ))
-            guard !response.items.isEmpty,
-                  response.items.count == boundedPageSize,
-                  ids.count < min(totalCount, maximumCount) else { break }
+            let hasAnotherPage = !response.items.isEmpty
+                && response.items.count == boundedPageSize
+                && currentPage * boundedPageSize < totalCount
+                && currentPage < 10
+            nextPage = hasAnotherPage ? currentPage + 1 : nil
+            guard hasAnotherPage,
+                  ids.count < maximumCount,
+                  maximumPages.map({ processedPages < $0 }) ?? true else { break }
             page += 1
         }
-        return (ids, totalCount, incomplete)
+        return (ids, totalCount, incomplete, nextPage)
     }
 
     private static func fetchDirectReviewCandidateNodes(
@@ -1020,23 +1109,23 @@ public struct GitHubClient: Sendable {
         guard !ids.isEmpty else { return ("", []) }
         var viewer = ""
         var nodes: [DirectReviewCandidateNode] = []
-        for (index, batch) in ids.chunked(into: 50).enumerated() {
-            let data = try runWithGatewayRetry(
-                executableURL: executableURL,
-                arguments: nodeGraphQLArguments(
-                    query: directReviewCandidatesGraphQLQuery,
-                    ids: batch
-                ),
-                onRetry: { attempt, maximumAttempts in
-                    onLog?(PRRefreshLogEvent(
-                        level: .warning,
-                        message: "\(logLabel) — batch \(index + 1): gateway error on attempt \(attempt) of \(maximumAttempts); retrying."
-                    ))
-                }
-            )
+        let batches = ids.chunked(into: 50)
+        let batchData = try fetchNodeBatchData(
+            executableURL: executableURL,
+            batches: batches,
+            query: directReviewCandidatesGraphQLQuery,
+            logLabel: logLabel,
+            phase: "classification",
+            onLog: onLog
+        )
+        for (index, data) in batchData.enumerated() {
             let result = try decodeDirectReviewCandidates(data)
             if !result.viewer.isEmpty { viewer = result.viewer }
             nodes.append(contentsOf: result.nodes)
+            onLog?(PRRefreshLogEvent(
+                level: .info,
+                message: "\(logLabel) — batch \(index + 1): classified \(result.nodes.count)."
+            ))
         }
         return (viewer, nodes)
     }
@@ -1050,22 +1139,65 @@ public struct GitHubClient: Sendable {
         guard !ids.isEmpty else { return ("", []) }
         var viewer = ""
         var nodes: [PRNode] = []
-        for (index, batch) in ids.chunked(into: 50).enumerated() {
-            let data = try runWithGatewayRetry(
-                executableURL: executableURL,
-                arguments: nodeGraphQLArguments(query: pullRequestNodesGraphQLQuery, ids: batch),
-                onRetry: { attempt, maximumAttempts in
-                    onLog?(PRRefreshLogEvent(
-                        level: .warning,
-                        message: "\(logLabel) — hydration batch \(index + 1): gateway error on attempt \(attempt) of \(maximumAttempts); retrying."
-                    ))
-                }
-            )
+        let batches = ids.chunked(into: 50)
+        let batchData = try fetchNodeBatchData(
+            executableURL: executableURL,
+            batches: batches,
+            query: pullRequestNodesGraphQLQuery,
+            logLabel: logLabel,
+            phase: "hydration",
+            onLog: onLog
+        )
+        for data in batchData {
             let result = try decodePullRequestNodes(data)
             if !result.viewer.isEmpty { viewer = result.viewer }
             nodes.append(contentsOf: result.nodes)
         }
         return (viewer, nodes)
+    }
+
+    static func fetchNodeBatchData(
+        executableURL: URL,
+        batches: [[String]],
+        query: String,
+        logLabel: String,
+        phase: String,
+        maximumConcurrentRequests: Int = 3,
+        onLog: (@Sendable (PRRefreshLogEvent) -> Void)?
+    ) throws -> [Data] {
+        guard !batches.isEmpty else { return [] }
+        let results = ConcurrentBatchResults(count: batches.count)
+        let queue = OperationQueue()
+        queue.name = "com.linquist.prwatcher.github.\(phase)"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = min(max(maximumConcurrentRequests, 1), batches.count)
+
+        for (index, batch) in batches.enumerated() {
+            queue.addOperation {
+                guard !results.hasError else { return }
+                do {
+                    let data = try runWithGatewayRetry(
+                        executableURL: executableURL,
+                        arguments: nodeGraphQLArguments(query: query, ids: batch),
+                        onRetry: { attempt, maximumAttempts in
+                            onLog?(PRRefreshLogEvent(
+                                level: .warning,
+                                message: "\(logLabel) — \(phase) batch \(index + 1): gateway error on attempt \(attempt) of \(maximumAttempts); retrying."
+                            ))
+                        }
+                    )
+                    results.record(data, at: index)
+                    onLog?(PRRefreshLogEvent(
+                        level: .info,
+                        message: "\(logLabel) — \(phase) batch \(index + 1) of \(batches.count): received \(batch.count)."
+                    ))
+                } catch {
+                    results.record(error)
+                }
+            }
+        }
+        queue.waitUntilAllOperationsAreFinished()
+        return try results.resolved()
     }
 
     static func nodeGraphQLArguments(query: String, ids: [String]) -> [String] {
@@ -1193,7 +1325,11 @@ public struct GitHubClient: Sendable {
         ))
     }
 
-    static func run(executableURL: URL, arguments: [String]) throws -> Data {
+    static func run(
+        executableURL: URL,
+        arguments: [String],
+        timeout: TimeInterval = 30
+    ) throws -> Data {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
@@ -1207,10 +1343,45 @@ public struct GitHubClient: Sendable {
         process.standardOutput = standardOutput
         process.standardError = standardError
 
+        let outputCollector = ProcessPipeCollector()
+        let errorCollector = ProcessPipeCollector()
+        let readerGroup = DispatchGroup()
+        let processFinished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in processFinished.signal() }
+
         try process.run()
-        process.waitUntilExit()
-        let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
+
+        readerGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outputCollector.append(standardOutput.fileHandleForReading.readDataToEndOfFile())
+            readerGroup.leave()
+        }
+        readerGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errorCollector.append(standardError.fileHandleForReading.readDataToEndOfFile())
+            readerGroup.leave()
+        }
+
+        let didTimeOut = processFinished.wait(timeout: .now() + max(timeout, 0.1)) == .timedOut
+        if didTimeOut {
+            if process.isRunning {
+                process.terminate()
+            }
+            if processFinished.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                _ = processFinished.wait(timeout: .now() + 2)
+            }
+        }
+        readerGroup.wait()
+
+        if didTimeOut {
+            throw GitHubClientError.commandFailed(
+                "GitHub request timed out after \(Int(max(timeout, 0.1).rounded())) seconds. prWatcher will try again at the next refresh."
+            )
+        }
+
+        let output = outputCollector.data()
+        let errorData = errorCollector.data()
 
         guard process.terminationStatus == 0 else {
             let error = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
