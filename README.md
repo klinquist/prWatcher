@@ -6,7 +6,7 @@
 
 prWatcher is a compact native macOS dashboard for the GitHub pull requests that need your attention. It lives comfortably in a corner of the display, talks to GitHub through your existing `gh` CLI login, and keeps useful results visible even when GitHub—or your network—is unavailable.
 
-Current version: **0.3.1**
+Current version: **0.3.2**
 
 Created by **Kristopher Linquist**.
 
@@ -65,7 +65,7 @@ Right-click a PR to copy its GitHub link, open it in the browser, or watch/unwat
 - Convert it to a draft or mark it ready for review.
 - Enable or cancel **Merge When Ready**.
 
-A permission-aware **Merge** button appears on PRs that are ready. **Merge When Ready** remembers the request and automatically merges after a later poll observes that the PR has moved from waiting/failing/draft into the ready state, then sends a notification. The automation can be canceled from the context menu.
+A permission-aware **Merge** button appears on PRs that are ready. **Merge When Ready** remembers the request and automatically merges after a later poll observes that the PR has moved from waiting/failing/draft into the ready state, then sends a notification and immediately moves an authored PR into Merged. The automation can be canceled from the context menu.
 
 ## Refreshing, caching, and offline behavior
 

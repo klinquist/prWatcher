@@ -161,6 +161,45 @@ func watchedRepresentation() throws {
     #expect(watched.viewerCanMerge)
 }
 
+@Test("A confirmed merge can immediately move a PR into Merged")
+func mergedRepresentation() throws {
+    let mergedAt = Date(timeIntervalSince1970: 1_700_000_200)
+    let pullRequest = PullRequest(
+        id: "ready",
+        number: 789,
+        title: "Ready change",
+        url: try #require(URL(string: "https://github.com/acme/widgets/pull/789")),
+        repository: "acme/widgets",
+        author: "octocat",
+        isDraft: false,
+        mergedAt: nil,
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_100),
+        reviewDecision: "APPROVED",
+        ciState: "SUCCESS",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        state: "OPEN",
+        viewerCanClose: true,
+        viewerCanUpdate: true,
+        viewerCanMerge: true,
+        assignment: nil,
+        section: .readyToMerge
+    )
+
+    let merged = pullRequest.asMerged(at: mergedAt)
+
+    #expect(merged.section == .merged)
+    #expect(merged.state == "MERGED")
+    #expect(merged.mergedAt == mergedAt)
+    #expect(merged.updatedAt == mergedAt)
+    #expect(!merged.isDraft)
+    #expect(!merged.viewerCanClose)
+    #expect(!merged.viewerCanUpdate)
+    #expect(!merged.viewerCanMerge)
+    #expect(merged.stateDetail == "Merged")
+    #expect(!merged.isReadyToMerge)
+}
+
 @Test("A watched PR detects status changes but not its initial load")
 func watchedStatusChangeDetection() throws {
     let pullRequest = PullRequest(

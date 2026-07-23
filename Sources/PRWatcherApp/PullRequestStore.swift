@@ -36,6 +36,15 @@ private struct MergeWhenReadyRegistration: Codable, Hashable {
     var wasReady: Bool
 }
 
+private struct MergeWhenReadyOutcome {
+    var mergedPullRequests: [PullRequest] = []
+    var errors: [String] = []
+
+    var errorMessage: String? {
+        errors.isEmpty ? nil : errors.joined(separator: "\n")
+    }
+}
+
 @MainActor
 final class PullRequestStore: ObservableObject {
     @Published private(set) var pullRequests: [PullRequest] = []
@@ -276,15 +285,37 @@ final class PullRequestStore: ObservableObject {
                 !snapshot.refreshedSections.contains($0.section)
                     && !refreshedIDs.contains($0.id)
             }
-            let visiblePullRequests = reconcileWatchedPullRequests(
+            let fetchedVisiblePullRequests = reconcileWatchedPullRequests(
                 refreshedPullRequests + retainedPullRequests,
                 cacheKey: key
             )
             let customPullRequests = snapshot.customSectionResults.flatMap(\.pullRequests)
-            let mergeWhenReadyError = await processMergeWhenReady(
-                candidates: uniquePullRequests(visiblePullRequests + customPullRequests),
+            let mergeWhenReadyOutcome = await processMergeWhenReady(
+                candidates: uniquePullRequests(fetchedVisiblePullRequests + customPullRequests),
                 client: client
             )
+            let visiblePullRequests = applyingConfirmedMerges(
+                mergeWhenReadyOutcome.mergedPullRequests,
+                to: fetchedVisiblePullRequests,
+                displayedAuthorLogin: requestedUserLogin ?? snapshot.viewerLogin,
+                includesWatchedSection: requestedUserLogin == nil
+            )
+            let mergedIDs = Set(mergeWhenReadyOutcome.mergedPullRequests.map(\.id))
+            let completedCustomSectionResults = snapshot.customSectionResults.map { result in
+                CustomPRSectionResult(
+                    sectionID: result.sectionID,
+                    pullRequests: result.pullRequests.filter { !mergedIDs.contains($0.id) }
+                )
+            }
+            if requestedUserLogin != nil, !mergeWhenReadyOutcome.mergedPullRequests.isEmpty {
+                pullRequestCache[meCacheKey] = applyingConfirmedMerges(
+                    mergeWhenReadyOutcome.mergedPullRequests,
+                    to: pullRequestCache[meCacheKey] ?? [],
+                    displayedAuthorLogin: snapshot.viewerLogin,
+                    includesWatchedSection: true
+                )
+                saveCachedWatchedPullRequests()
+            }
             if requestedUserLogin == nil {
                 recordWatchedStatusChangesAsUnread(
                     visiblePullRequests,
@@ -294,14 +325,14 @@ final class PullRequestStore: ObservableObject {
             recordCompletedSnapshot(visiblePullRequests, trackingKey: readTrackingKey)
             if requestedUserLogin == nil {
                 recordCompletedCustomSnapshots(
-                    snapshot.customSectionResults,
+                    completedCustomSectionResults,
                     refreshedSectionIDs: snapshot.refreshedCustomSectionIDs,
                     trackingKey: readTrackingKey
                 )
                 for sectionID in snapshot.refreshedCustomSectionIDs {
                     customSectionPullRequests.removeValue(forKey: sectionID)
                 }
-                for result in snapshot.customSectionResults {
+                for result in completedCustomSectionResults {
                     customSectionPullRequests[result.sectionID] = result.pullRequests
                 }
                 let enabledCustomIDs = Set(enabledCustomSections.map(\.id))
@@ -313,7 +344,10 @@ final class PullRequestStore: ObservableObject {
                             .flatMap { $0 }
                 )
                 if hasLoadedOnce {
-                    await notifyAboutChanges(in: trackedPullRequests)
+                    await notifyAboutChanges(
+                        in: trackedPullRequests,
+                        excluding: mergedIDs
+                    )
                 }
                 previousStates = Dictionary(uniqueKeysWithValues: trackedPullRequests.map {
                     ($0.id, $0.statusFingerprint)
@@ -331,7 +365,7 @@ final class PullRequestStore: ObservableObject {
             if cacheKey(for: selectedUserLogin) == key {
                 pullRequests = visiblePullRequests
                 lastUpdated = snapshot.fetchedAt
-                let combinedError = [mergeWhenReadyError, snapshot.refreshWarning]
+                let combinedError = [mergeWhenReadyOutcome.errorMessage, snapshot.refreshWarning]
                     .compactMap { $0 }
                     .joined(separator: "\n")
                 errorMessage = combinedError.isEmpty ? nil : combinedError
@@ -700,9 +734,13 @@ final class PullRequestStore: ObservableObject {
         }
     }
 
-    private func notifyAboutChanges(in newPullRequests: [PullRequest]) async {
+    private func notifyAboutChanges(
+        in newPullRequests: [PullRequest],
+        excluding excludedPullRequestIDs: Set<String> = []
+    ) async {
         guard AppRuntime.supportsUserNotifications else { return }
         for pullRequest in newPullRequests {
+            guard !excludedPullRequestIDs.contains(pullRequest.id) else { continue }
             guard pullRequest.hasNotifiableStatusChange(
                 from: previousStates[pullRequest.id]
             ) else { continue }
@@ -746,10 +784,10 @@ final class PullRequestStore: ObservableObject {
     private func processMergeWhenReady(
         candidates: [PullRequest],
         client: GitHubClient
-    ) async -> String? {
-        guard !mergeWhenReadyRegistrations.isEmpty else { return nil }
+    ) async -> MergeWhenReadyOutcome {
+        guard !mergeWhenReadyRegistrations.isEmpty else { return MergeWhenReadyOutcome() }
         var candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
-        var errors: [String] = []
+        var outcome = MergeWhenReadyOutcome()
 
         for originalRegistration in Array(mergeWhenReadyRegistrations.values) {
             var pullRequest = candidatesByID[originalRegistration.pullRequestID]
@@ -783,19 +821,20 @@ final class PullRequestStore: ObservableObject {
             do {
                 try await client.merge(pullRequest)
                 mergeWhenReadyRegistrations.removeValue(forKey: originalRegistration.pullRequestID)
+                outcome.mergedPullRequests.append(pullRequest.asMerged())
                 await notifyAutoMerge(of: pullRequest)
             } catch {
                 if var currentRegistration = mergeWhenReadyRegistrations[originalRegistration.pullRequestID] {
                     currentRegistration.wasReady = false
                     mergeWhenReadyRegistrations[originalRegistration.pullRequestID] = currentRegistration
                 }
-                errors.append("Could not auto-merge \(pullRequest.repository)#\(pullRequest.number): \(error.localizedDescription)")
+                outcome.errors.append("Could not auto-merge \(pullRequest.repository)#\(pullRequest.number): \(error.localizedDescription)")
             }
             mergeWhenReadyInFlight.remove(originalRegistration.pullRequestID)
         }
 
         saveMergeWhenReadyRegistrations()
-        return errors.isEmpty ? nil : errors.joined(separator: "\n")
+        return outcome
     }
 
     private func notifyAutoMerge(of pullRequest: PullRequest) async {
@@ -1003,6 +1042,27 @@ final class PullRequestStore: ObservableObject {
     private func uniquePullRequests(_ pullRequests: [PullRequest]) -> [PullRequest] {
         var seen = Set<String>()
         return pullRequests.filter { seen.insert($0.id).inserted }
+    }
+
+    private func applyingConfirmedMerges(
+        _ mergedPullRequests: [PullRequest],
+        to pullRequests: [PullRequest],
+        displayedAuthorLogin: String,
+        includesWatchedSection: Bool
+    ) -> [PullRequest] {
+        guard !mergedPullRequests.isEmpty else { return pullRequests }
+        let mergedIDs = Set(mergedPullRequests.map(\.id))
+        var updated = pullRequests.filter { !mergedIDs.contains($0.id) }
+
+        for pullRequest in mergedPullRequests {
+            if includesWatchedSection && isWatching(pullRequest) {
+                updated.append(pullRequest.asWatched)
+            } else if enabledBuiltInSections.contains(.merged),
+                      pullRequest.author.caseInsensitiveCompare(displayedAuthorLogin) == .orderedSame {
+                updated.append(pullRequest)
+            }
+        }
+        return uniquePullRequests(updated)
     }
 
     private func reconcileWatchedPullRequests(

@@ -219,6 +219,31 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
             section: .watched
         )
     }
+
+    public func asMerged(at date: Date = Date()) -> PullRequest {
+        PullRequest(
+            id: id,
+            number: number,
+            title: title,
+            url: url,
+            repository: repository,
+            author: author,
+            isDraft: false,
+            createdAt: createdAt,
+            mergedAt: date,
+            updatedAt: date,
+            reviewDecision: reviewDecision,
+            ciState: ciState,
+            mergeable: mergeable,
+            mergeStateStatus: "CLEAN",
+            state: "MERGED",
+            viewerCanClose: false,
+            viewerCanUpdate: false,
+            viewerCanMerge: false,
+            assignment: nil,
+            section: .merged
+        )
+    }
 }
 
 public struct GitHubUserProfile: Identifiable, Hashable, Codable, Sendable {

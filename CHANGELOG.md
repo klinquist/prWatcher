@@ -4,6 +4,12 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-22
+
+### Fixed
+
+- Move an authored PR into Merged immediately after Merge When Ready receives a successful merge response.
+
 ## [0.3.1] - 2026-07-22
 
 ### Fixed
