@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode user and build data
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.xcarchive/
+*.dSYM/
+*.dSYM.zip
+
+# Locally built app bundles
+dist/
+*.app/
+
+# Local editor settings
+.idea/
+.vscode/
+*~
+*.orig
+
+# Local configuration and signing credentials
+.env
+.env.*
+!.env.example
+*.cer
+*.p12
+*.mobileprovision
