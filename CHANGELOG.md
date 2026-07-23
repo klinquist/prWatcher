@@ -4,6 +4,10 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+### Security
+
+- Keep App Store Connect key identifiers and paths out of normal Xcode build invocations unless explicitly enabled.
+
 ## [0.4.0] - 2026-07-23
 
 ### Added

@@ -20,6 +20,7 @@ export_options_plist="$build_root/export-options.plist"
 sign_for_distribution="${SIGN_FOR_DISTRIBUTION:-0}"
 notarize_dmg="${NOTARIZE_DMG:-0}"
 allow_provisioning_updates="${ALLOW_PROVISIONING_UPDATES:-0}"
+use_asc_key_for_xcodebuild="${USE_ASC_KEY_FOR_XCODEBUILD:-0}"
 development_team="${DEVELOPMENT_TEAM:-}"
 developer_id_application_identity="${DEVELOPER_ID_APPLICATION_IDENTITY:-Developer ID Application}"
 
@@ -66,9 +67,9 @@ resolve_signing_configuration() {
 }
 
 xcodebuild_auth_args=()
-if [[ -n "${ASC_KEY_PATH:-}" || -n "${ASC_KEY_ID:-}" || -n "${ASC_ISSUER_ID:-}" ]]; then
+if [[ "$use_asc_key_for_xcodebuild" == "1" ]]; then
     if [[ -z "${ASC_KEY_PATH:-}" || -z "${ASC_KEY_ID:-}" || -z "${ASC_ISSUER_ID:-}" ]]; then
-        print -u2 "ASC_KEY_PATH, ASC_KEY_ID, and ASC_ISSUER_ID must be set together."
+        print -u2 "USE_ASC_KEY_FOR_XCODEBUILD requires all three ASC_KEY_* variables."
         exit 1
     fi
     xcodebuild_auth_args=(
