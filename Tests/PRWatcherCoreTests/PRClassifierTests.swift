@@ -254,6 +254,42 @@ func mergedRepresentation() throws {
     #expect(!merged.isReadyToMerge)
 }
 
+@Test("Cached PRs from before native auto-merge fields still decode")
+func legacyPullRequestCacheDecoding() throws {
+    let pullRequest = PullRequest(
+        id: "legacy",
+        number: 10,
+        title: "Legacy cache",
+        url: try #require(URL(string: "https://github.com/acme/widgets/pull/10")),
+        repository: "acme/widgets",
+        author: "octocat",
+        isDraft: false,
+        mergedAt: nil,
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        reviewDecision: "REVIEW_REQUIRED",
+        ciState: "PENDING",
+        mergeable: "MERGEABLE",
+        state: "OPEN",
+        assignment: nil,
+        section: .waitingForReview
+    )
+    let encoded = try JSONEncoder().encode(pullRequest)
+    var object = try #require(
+        JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    )
+    object.removeValue(forKey: "viewerCanEnableAutoMerge")
+    object.removeValue(forKey: "autoMergeEnabled")
+    object.removeValue(forKey: "preferredMergeMethod")
+
+    let decoded = try JSONDecoder().decode(
+        PullRequest.self,
+        from: JSONSerialization.data(withJSONObject: object)
+    )
+    #expect(!decoded.viewerCanEnableAutoMerge)
+    #expect(!decoded.autoMergeEnabled)
+    #expect(decoded.preferredMergeMethod == .merge)
+}
+
 @Test("A watched PR detects status changes but not its initial load")
 func watchedStatusChangeDetection() throws {
     let pullRequest = PullRequest(

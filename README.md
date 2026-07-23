@@ -6,7 +6,7 @@
 
 prWatcher is a compact native macOS dashboard for the GitHub pull requests that need your attention. It lives comfortably in a corner of the display, talks to GitHub through your existing `gh` CLI login, and keeps useful results visible even when GitHub—or your network—is unavailable.
 
-Current version: **0.6.2**
+Current version: **0.7.0**
 
 Created by **Kristopher Linquist**.
 
@@ -63,9 +63,11 @@ Right-click a PR to copy its GitHub link, open it in the browser, or watch/unwat
 
 - Close the pull request.
 - Convert it to a draft or mark it ready for review.
-- Enable or cancel **Merge When Ready**.
+- Enable or cancel **Auto-Merge**.
 
-A permission-aware **Merge** button appears on PRs that are ready. **Merge When Ready** remembers the request and automatically merges after a later poll observes that the PR has moved from waiting/failing/draft into the ready state, then sends a notification and immediately moves an authored PR into Merged. The automation can be canceled from the context menu.
+A permission-aware **Merge** button appears on PRs that are ready. When a repository supports GitHub native auto-merge, prWatcher delegates the request to GitHub so it can complete while the app is closed or the Mac is asleep. Otherwise, prWatcher automatically retains its polling-based Merge When Ready fallback and marks the row with a polling icon. The automation can be canceled from the context menu.
+
+Single-click a PR row to expand it. The expanded view explains why the PR is blocked, including merge conflicts, branch update requirements, requested reviewers, approval or changes-requested outcomes, unresolved review conversations, and each CI check. Required checks are labeled separately from informational checks, and check-detail links open the corresponding GitHub page. Expanded details are fetched only on demand, so normal background polling does not pay their GraphQL cost. Opening the PR itself remains available from the right-click menu.
 
 ## Refreshing, caching, and offline behavior
 
@@ -87,7 +89,7 @@ A permission-aware **Merge** button appears on PRs that are ready. **Merge When 
 
 ## Notifications and unread results
 
-prWatcher can notify when a PR first appears in a tracked section, changes section, or changes watched/custom status. Newly discovered or changed rows are highlighted. The first click marks a highlighted row as read instead of opening it, and collapsed sections show an unread badge.
+prWatcher can notify when a PR first appears in a tracked section, changes section, or changes watched/custom status. Newly discovered or changed rows are highlighted. A click marks a highlighted row as read and expands its details; collapsed sections show an unread badge.
 
 macOS Focus and notification settings still control whether alerts are delivered. Notifications require the bundled `.app`; they are disabled when running the Swift Package executable directly.
 

@@ -470,14 +470,19 @@ private struct PullRequestRow: View {
     let customSectionID: UUID?
     let tint: Color
     @State private var isConfirmingMerge = false
+    @State private var isExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 if store.isUnread(pullRequest, customSectionID: customSectionID) {
                     store.markRead(pullRequest, customSectionID: customSectionID)
-                } else {
-                    store.open(pullRequest)
+                }
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isExpanded.toggle()
+                }
+                if isExpanded {
+                    Task { await store.loadDetails(for: pullRequest) }
                 }
             } label: {
                 HStack(alignment: .top, spacing: 9) {
@@ -534,18 +539,40 @@ private struct PullRequestRow: View {
                         }
 
                         if store.isMergeWhenReadyEnabled(pullRequest) {
-                            Label("MERGE WHEN READY", systemImage: "bolt.fill")
+                            Label(
+                                store.usesPollingForMergeWhenReady(pullRequest)
+                                    ? "AUTO-MERGE · POLLING"
+                                    : "AUTO-MERGE ENABLED",
+                                systemImage: store.usesPollingForMergeWhenReady(pullRequest)
+                                    ? "arrow.triangle.2.circlepath"
+                                    : "bolt.fill"
+                            )
                                 .font(.caption2.bold())
                                 .foregroundStyle(Color.orange)
+                                .help(
+                                    store.usesPollingForMergeWhenReady(pullRequest)
+                                        ? "GitHub native auto-merge is unavailable; prWatcher will poll and merge when ready."
+                                        : "GitHub is responsible for merging this pull request when its requirements pass."
+                                )
                         }
                     }
                     Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .padding(.top, 6)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            if isExpanded {
+                PullRequestDetailsView(pullRequest: pullRequest, store: store)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             if pullRequest.isReadyToMerge && pullRequest.viewerCanMerge {
                 HStack {
@@ -588,11 +615,11 @@ private struct PullRequestRow: View {
             if isOpen && hasManageActions {
                 Divider()
                 if store.isMergeWhenReadyEnabled(pullRequest) {
-                    Button("Cancel Merge When Ready") {
+                    Button("Cancel Auto-Merge") {
                         store.cancelMergeWhenReady(pullRequest)
                     }
                 } else if pullRequest.viewerCanMerge && !pullRequest.isReadyToMerge {
-                    Button("Merge When Ready") {
+                    Button("Enable Auto-Merge") {
                         store.enableMergeWhenReady(pullRequest)
                     }
                 }
@@ -641,6 +668,178 @@ private struct PullRequestRow: View {
         store.isMergeWhenReadyEnabled(pullRequest)
             || (pullRequest.viewerCanMerge && !pullRequest.isReadyToMerge)
             || pullRequest.viewerCanUpdate
+    }
+}
+
+private struct PullRequestDetailsView: View {
+    let pullRequest: PullRequest
+    @ObservedObject var store: PullRequestStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+
+            if store.detailLoadingIDs.contains(pullRequest.id) {
+                Label("Loading blockers and checks…", systemImage: "ellipsis")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let error = store.detailErrors[pullRequest.id] {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Button("Try Again") {
+                        Task { await store.loadDetails(for: pullRequest, force: true) }
+                    }
+                    .buttonStyle(.link)
+                }
+                .font(.caption)
+            } else if let details = store.pullRequestDetails[pullRequest.id] {
+                detailsContent(details)
+            } else {
+                Button("Load details") {
+                    Task { await store.loadDetails(for: pullRequest) }
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal, 47)
+        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private func detailsContent(_ details: PullRequestDetails) -> some View {
+        detailHeading("Why blocked", systemImage: "exclamationmark.lock.fill")
+        if details.blockerReasons.isEmpty {
+            detailLine(
+                "No current blockers detected",
+                systemImage: "checkmark.circle.fill",
+                color: .green
+            )
+        } else {
+            ForEach(details.blockerReasons, id: \.self) { reason in
+                detailLine(reason, systemImage: "exclamationmark.circle.fill", color: .orange)
+            }
+        }
+
+        if !details.requestedReviewers.isEmpty || !details.reviews.isEmpty
+            || details.totalReviewThreadCount > 0 {
+            detailHeading("Reviews", systemImage: "person.2.fill")
+            if !details.requestedReviewers.isEmpty {
+                detailLine(
+                    "Requested: \(details.requestedReviewers.joined(separator: ", "))",
+                    systemImage: "person.crop.circle.badge.clock",
+                    color: .secondary
+                )
+            }
+            ForEach(details.reviews) { review in
+                detailLine(
+                    "@\(review.reviewer): \(displayStatus(review.state))",
+                    systemImage: reviewSymbol(review.state),
+                    color: reviewColor(review.state)
+                )
+            }
+            if details.totalReviewThreadCount > 0 {
+                detailLine(
+                    "\(details.unresolvedReviewThreadCount) of \(details.totalReviewThreadCount) review conversations unresolved",
+                    systemImage: details.unresolvedReviewThreadCount == 0
+                        ? "checkmark.bubble.fill"
+                        : "bubble.left.and.exclamationmark.bubble.right.fill",
+                    color: details.unresolvedReviewThreadCount == 0 ? .green : .orange
+                )
+            }
+        }
+
+        detailHeading("CI checks", systemImage: "checklist")
+        if details.checks.isEmpty {
+            detailLine("No checks reported", systemImage: "minus.circle", color: .secondary)
+        } else {
+            ForEach(details.checks) { check in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: checkSymbol(check))
+                        .foregroundStyle(checkColor(check))
+                        .frame(width: 14)
+                    Text(check.name)
+                        .lineLimit(2)
+                    if check.isRequired {
+                        Text("REQUIRED")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.orange.opacity(0.12), in: Capsule())
+                    }
+                    Spacer(minLength: 4)
+                    Text(displayStatus(check.status))
+                        .foregroundStyle(.secondary)
+                    if let url = check.detailsURL {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Image(systemName: "arrow.up.right.square")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open this check on GitHub")
+                    }
+                }
+                .font(.caption2)
+            }
+        }
+
+        Button {
+            Task { await store.loadDetails(for: pullRequest, force: true) }
+        } label: {
+            Label("Refresh details", systemImage: "arrow.clockwise")
+        }
+        .buttonStyle(.link)
+        .font(.caption2)
+    }
+
+    private func detailHeading(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .padding(.top, 2)
+    }
+
+    private func detailLine(_ text: String, systemImage: String, color: Color) -> some View {
+        Label {
+            Text(text).foregroundStyle(.secondary)
+        } icon: {
+            Image(systemName: systemImage).foregroundStyle(color)
+        }
+        .font(.caption2)
+    }
+
+    private func displayStatus(_ value: String) -> String {
+        value.replacingOccurrences(of: "_", with: " ").lowercased().capitalized
+    }
+
+    private func checkSymbol(_ check: PullRequestCheck) -> String {
+        if check.isSuccessful { return "checkmark.circle.fill" }
+        if check.isFailing { return "xmark.octagon.fill" }
+        return "clock.fill"
+    }
+
+    private func checkColor(_ check: PullRequestCheck) -> Color {
+        if check.isSuccessful { return .green }
+        if check.isFailing { return .red }
+        return .orange
+    }
+
+    private func reviewSymbol(_ state: String) -> String {
+        switch state {
+        case "APPROVED": "checkmark.circle.fill"
+        case "CHANGES_REQUESTED": "exclamationmark.circle.fill"
+        default: "text.bubble.fill"
+        }
+    }
+
+    private func reviewColor(_ state: String) -> Color {
+        switch state {
+        case "APPROVED": .green
+        case "CHANGES_REQUESTED": .orange
+        default: .secondary
+        }
     }
 }
 

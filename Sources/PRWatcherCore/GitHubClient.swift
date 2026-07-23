@@ -531,6 +531,30 @@ public struct GitHubClient: Sendable {
         }.value
     }
 
+    public func fetchPullRequestDetails(url: URL) async throws -> PullRequestDetails {
+        guard let reference = GitHubPullRequestReference(url: url) else {
+            throw GitHubClientError.invalidResponse("Enter a valid GitHub pull request URL")
+        }
+        let executableURL = self.executableURL
+        return try await Task.detached(priority: .userInitiated) {
+            var arguments = ["api", "graphql"]
+            if reference.host.lowercased() != "github.com" {
+                arguments += ["--hostname", reference.host]
+            }
+            arguments += [
+                "-f", "query=\(Self.pullRequestDetailsGraphQLQuery)",
+                "-f", "owner=\(reference.owner)",
+                "-f", "repository=\(reference.repository)",
+                "-F", "number=\(reference.number)",
+            ]
+            let data = try Self.runWithGatewayRetry(
+                executableURL: executableURL,
+                arguments: arguments
+            )
+            return try Self.decodePullRequestDetails(data)
+        }.value
+    }
+
     public func customSearchMatchCount(query: String) async throws -> Int {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -619,6 +643,17 @@ public struct GitHubClient: Sendable {
         try await runAction(["pr", "merge", pullRequest.url.absoluteString, "--merge"])
     }
 
+    public func enableAutoMerge(_ pullRequest: PullRequest) async throws {
+        let method = pullRequest.preferredMergeMethod ?? .merge
+        try await runAction([
+            "pr", "merge", pullRequest.url.absoluteString, "--auto", method.ghFlag,
+        ])
+    }
+
+    public func disableAutoMerge(_ pullRequest: PullRequest) async throws {
+        try await runAction(["pr", "merge", pullRequest.url.absoluteString, "--disable-auto"])
+    }
+
     private func runAction(_ arguments: [String]) async throws {
         let executableURL = self.executableURL
         _ = try await Task.detached(priority: .userInitiated) {
@@ -651,8 +686,15 @@ public struct GitHubClient: Sendable {
       viewerCanClose
       viewerCanUpdate
       viewerCanEnableAutoMerge
+      autoMergeRequest { mergeMethod }
       author { login }
-      repository { nameWithOwner viewerPermission }
+      repository {
+        nameWithOwner
+        viewerPermission
+        mergeCommitAllowed
+        squashMergeAllowed
+        rebaseMergeAllowed
+      }
       assignees(first: 20) { nodes { login } }
       reviewRequests(first: 20) {
         nodes {
@@ -688,8 +730,15 @@ public struct GitHubClient: Sendable {
           viewerCanClose
           viewerCanUpdate
           viewerCanEnableAutoMerge
+          autoMergeRequest { mergeMethod }
           author { login }
-          repository { nameWithOwner viewerPermission }
+          repository {
+            nameWithOwner
+            viewerPermission
+            mergeCommitAllowed
+            squashMergeAllowed
+            rebaseMergeAllowed
+          }
           assignees(first: 20) { nodes { login } }
           reviewRequests(first: 20) {
             nodes {
@@ -747,8 +796,15 @@ public struct GitHubClient: Sendable {
           viewerCanClose
           viewerCanUpdate
           viewerCanEnableAutoMerge
+          autoMergeRequest { mergeMethod }
           author { login }
-          repository { nameWithOwner viewerPermission }
+          repository {
+            nameWithOwner
+            viewerPermission
+            mergeCommitAllowed
+            squashMergeAllowed
+            rebaseMergeAllowed
+          }
           assignees(first: 20) { nodes { login } }
           reviewRequests(first: 20) {
             nodes {
@@ -771,6 +827,62 @@ public struct GitHubClient: Sendable {
       user(login: $login) {
         login
         name
+      }
+    }
+    """#
+
+    static let pullRequestDetailsGraphQLQuery = #"""
+    query PRWatcherDetails($owner: String!, $repository: String!, $number: Int!) {
+      repository(owner: $owner, name: $repository) {
+        pullRequest(number: $number) {
+          isDraft
+          reviewDecision
+          mergeable
+          mergeStateStatus
+          state
+          reviewRequests(first: 50) {
+            nodes {
+              requestedReviewer {
+                ... on User { login }
+                ... on Team { name slug organization { login } }
+              }
+            }
+          }
+          latestReviews(first: 50) {
+            nodes { state author { login } }
+          }
+          reviewThreads(first: 100) {
+            totalCount
+            nodes { isResolved }
+          }
+          commits(last: 1) {
+            nodes {
+              commit {
+                statusCheckRollup {
+                  state
+                  contexts(first: 100) {
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        name
+                        status
+                        conclusion
+                        detailsUrl
+                        isRequired(pullRequestNumber: $number)
+                      }
+                      ... on StatusContext {
+                        context
+                        state
+                        targetUrl
+                        isRequired(pullRequestNumber: $number)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
     """#
@@ -1561,6 +1673,157 @@ public struct GitHubClient: Sendable {
         return pullRequest
     }
 
+    static func decodePullRequestDetails(_ data: Data) throws -> PullRequestDetails {
+        let response: PullRequestDetailsGraphQLResponse
+        do {
+            response = try JSONDecoder().decode(PullRequestDetailsGraphQLResponse.self, from: data)
+        } catch {
+            throw GitHubClientError.invalidResponse(error.localizedDescription)
+        }
+
+        if let message = response.errors?.map(\.message).joined(separator: "\n"), !message.isEmpty {
+            throw GitHubClientError.commandFailed(message)
+        }
+        guard let node = response.data?.repository?.pullRequest else {
+            throw GitHubClientError.invalidResponse(
+                "Pull request details were not found or your gh account cannot access them"
+            )
+        }
+
+        let requestedReviewers = node.reviewRequests.nodes.compactMap { request -> String? in
+            guard let reviewer = request?.requestedReviewer else { return nil }
+            if let login = reviewer.login { return "@\(login)" }
+            if let slug = reviewer.slug, let organization = reviewer.organization?.login {
+                return "@\(organization)/\(slug)"
+            }
+            return reviewer.name ?? reviewer.slug
+        }
+        .uniqued()
+        .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+
+        let reviews = (node.latestReviews?.nodes ?? []).compactMap { review -> PullRequestReview? in
+            guard let review, let login = review.author?.login else { return nil }
+            return PullRequestReview(reviewer: login, state: review.state)
+        }
+        .sorted { $0.reviewer.localizedCaseInsensitiveCompare($1.reviewer) == .orderedAscending }
+
+        let contexts = node.commits.nodes.compactMap { $0 }
+            .last?.commit.statusCheckRollup?.contexts?.nodes ?? []
+        let checks = contexts.enumerated().compactMap { index, context -> PullRequestCheck? in
+            guard let context else { return nil }
+            let name = context.name ?? context.context ?? "Unnamed check"
+            let status: String
+            if context.typeName == "CheckRun" {
+                status = context.status == "COMPLETED"
+                    ? (context.conclusion ?? context.status ?? "COMPLETED")
+                    : (context.status ?? context.conclusion ?? "UNKNOWN")
+            } else {
+                status = context.state ?? "UNKNOWN"
+            }
+            return PullRequestCheck(
+                id: "\(context.typeName)|\(name)|\(index)",
+                name: name,
+                status: status,
+                isRequired: context.isRequired ?? false,
+                detailsURL: context.detailsURL ?? context.targetURL
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.isRequired != rhs.isRequired { return lhs.isRequired }
+            if lhs.isFailing != rhs.isFailing { return lhs.isFailing }
+            if lhs.isPending != rhs.isPending { return lhs.isPending }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+
+        let reviewThreads = node.reviewThreads?.nodes.compactMap { $0 } ?? []
+        let unresolvedThreadCount = reviewThreads.filter { !$0.isResolved }.count
+        let totalThreadCount = node.reviewThreads?.totalCount ?? reviewThreads.count
+        let rollupState = node.commits.nodes.compactMap { $0 }
+            .last?.commit.statusCheckRollup?.state
+        let blockerReasons = blockerReasons(
+            for: node,
+            rollupState: rollupState,
+            requestedReviewers: requestedReviewers,
+            reviews: reviews,
+            checks: checks,
+            unresolvedReviewThreadCount: unresolvedThreadCount
+        )
+
+        return PullRequestDetails(
+            requestedReviewers: requestedReviewers,
+            reviews: reviews,
+            checks: checks,
+            unresolvedReviewThreadCount: unresolvedThreadCount,
+            totalReviewThreadCount: totalThreadCount,
+            blockerReasons: blockerReasons
+        )
+    }
+
+    private static func blockerReasons(
+        for node: PullRequestDetailsNode,
+        rollupState: String?,
+        requestedReviewers: [String],
+        reviews: [PullRequestReview],
+        checks: [PullRequestCheck],
+        unresolvedReviewThreadCount: Int
+    ) -> [String] {
+        var reasons: [String] = []
+        if node.state == "CLOSED" { reasons.append("The pull request is closed") }
+        if node.isDraft { reasons.append("The pull request is still a draft") }
+        if node.mergeable == "CONFLICTING" || node.mergeStateStatus == "DIRTY" {
+            reasons.append("Merge conflicts must be resolved")
+        }
+        if node.mergeStateStatus == "BEHIND" {
+            reasons.append("The head branch must be updated with the base branch")
+        }
+
+        let requiredFailing = checks.filter { $0.isRequired && $0.isFailing }
+        let requiredPending = checks.filter { $0.isRequired && $0.isPending }
+        if !requiredFailing.isEmpty {
+            reasons.append("Required checks failing: \(requiredFailing.map(\.name).joined(separator: ", "))")
+        }
+        if !requiredPending.isEmpty {
+            reasons.append("Required checks pending: \(requiredPending.map(\.name).joined(separator: ", "))")
+        }
+        if requiredFailing.isEmpty && requiredPending.isEmpty {
+            switch PRClassifier.blockingCIState(
+                rollupState: rollupState,
+                mergeStateStatus: node.mergeStateStatus
+            ) {
+            case "FAILURE", "ERROR": reasons.append("One or more required checks are failing")
+            case "PENDING", "EXPECTED": reasons.append("Waiting for one or more required checks")
+            default: break
+            }
+        }
+
+        switch node.reviewDecision {
+        case "CHANGES_REQUESTED":
+            let reviewers = reviews.filter { $0.state == "CHANGES_REQUESTED" }.map { "@\($0.reviewer)" }
+            reasons.append(
+                reviewers.isEmpty
+                    ? "Changes were requested"
+                    : "Changes requested by \(reviewers.joined(separator: ", "))"
+            )
+        case "REVIEW_REQUIRED":
+            reasons.append(
+                requestedReviewers.isEmpty
+                    ? "Waiting for required approval"
+                    : "Waiting for review from \(requestedReviewers.joined(separator: ", "))"
+            )
+        default:
+            break
+        }
+
+        if unresolvedReviewThreadCount > 0 && node.mergeStateStatus == "BLOCKED" {
+            let noun = unresolvedReviewThreadCount == 1 ? "conversation" : "conversations"
+            reasons.append("\(unresolvedReviewThreadCount) unresolved review \(noun)")
+        }
+        if reasons.isEmpty && node.mergeStateStatus == "BLOCKED" {
+            reasons.append("A repository rule is currently blocking the merge")
+        }
+        return reasons.uniqued()
+    }
+
     static func decodeUserProfile(_ data: Data) throws -> GitHubUserProfile {
         let response: UserProfileGraphQLResponse
         do {
@@ -1671,6 +1934,16 @@ public struct GitHubClient: Sendable {
         assignment: AssignmentKind?
     ) -> PullRequest {
         let ciState = node.commits.nodes.compactMap { $0 }.last?.commit.statusCheckRollup?.state
+        let preferredMergeMethod: PullRequestMergeMethod?
+        if node.repository.mergeCommitAllowed != false {
+            preferredMergeMethod = .merge
+        } else if node.repository.squashMergeAllowed == true {
+            preferredMergeMethod = .squash
+        } else if node.repository.rebaseMergeAllowed == true {
+            preferredMergeMethod = .rebase
+        } else {
+            preferredMergeMethod = nil
+        }
         return PullRequest(
             id: node.id,
             number: node.number,
@@ -1691,6 +1964,9 @@ public struct GitHubClient: Sendable {
             viewerCanUpdate: node.viewerCanUpdate ?? false,
             viewerCanMerge: node.viewerCanEnableAutoMerge == true
                 || Self.permissionAllowsMerging(node.repository.viewerPermission),
+            viewerCanEnableAutoMerge: node.viewerCanEnableAutoMerge ?? false,
+            autoMergeEnabled: node.autoMergeRequest != nil,
+            preferredMergeMethod: preferredMergeMethod,
             assignment: assignment,
             section: section
         )
@@ -1721,6 +1997,11 @@ private extension ISO8601DateFormatter {
 }
 
 private extension Array {
+    func uniqued() -> [Element] where Element: Hashable {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
+    }
+
     func chunked(into size: Int) -> [[Element]] {
         guard size > 0 else { return [self] }
         return stride(from: 0, to: count, by: size).map {

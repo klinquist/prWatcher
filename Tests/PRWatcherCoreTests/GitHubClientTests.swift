@@ -487,6 +487,79 @@ func decodeWatchedPullRequest() throws {
     #expect(node.commits.nodes.compactMap { $0 }.first?.commit.statusCheckRollup?.state == "SUCCESS")
 }
 
+@Test("Expanded PR details identify required CI and review blockers")
+func decodePullRequestDetails() throws {
+    let json = #"""
+    {
+      "data": {
+        "repository": {
+          "pullRequest": {
+            "isDraft": false,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BLOCKED",
+            "state": "OPEN",
+            "reviewRequests": { "nodes": [
+              { "requestedReviewer": { "login": "octocat" } },
+              { "requestedReviewer": {
+                "name": "Platform",
+                "slug": "platform",
+                "organization": { "login": "acme" }
+              } }
+            ] },
+            "latestReviews": { "nodes": [
+              { "state": "APPROVED", "author": { "login": "hubot" } }
+            ] },
+            "reviewThreads": {
+              "totalCount": 2,
+              "nodes": [{ "isResolved": false }, { "isResolved": true }]
+            },
+            "commits": { "nodes": [{ "commit": {
+              "statusCheckRollup": {
+                "state": "FAILURE",
+                "contexts": { "nodes": [
+                  {
+                    "__typename": "CheckRun",
+                    "name": "required-tests",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                    "detailsUrl": "https://github.com/acme/widgets/actions/runs/1",
+                    "isRequired": true
+                  },
+                  {
+                    "__typename": "StatusContext",
+                    "context": "optional-lint",
+                    "state": "PENDING",
+                    "targetUrl": null,
+                    "isRequired": false
+                  }
+                ] }
+              }
+            } }] }
+          }
+        }
+      }
+    }
+    """#
+
+    let details = try GitHubClient.decodePullRequestDetails(Data(json.utf8))
+
+    #expect(details.requestedReviewers == ["@acme/platform", "@octocat"])
+    #expect(details.reviews == [PullRequestReview(reviewer: "hubot", state: "APPROVED")])
+    #expect(details.checks.count == 2)
+    #expect(details.checks.first?.name == "required-tests")
+    #expect(details.checks.first?.isRequired == true)
+    #expect(details.checks.first?.isFailing == true)
+    #expect(details.checks.last?.name == "optional-lint")
+    #expect(details.checks.last?.isRequired == false)
+    #expect(details.unresolvedReviewThreadCount == 1)
+    #expect(details.blockerReasons.contains { $0.contains("Required checks failing") })
+    #expect(details.blockerReasons.contains { $0.contains("Waiting for review") })
+    #expect(details.blockerReasons.contains("1 unresolved review conversation"))
+    #expect(GitHubClient.pullRequestDetailsGraphQLQuery.contains("isRequired"))
+    #expect(GitHubClient.pullRequestDetailsGraphQLQuery.contains("reviewThreads"))
+}
+
 @Test("GitHub usernames are normalized and constrained")
 func normalizeGitHubLogin() {
     #expect(GitHubClient.normalizedGitHubLogin(" @Octo-Cat ") == "Octo-Cat")

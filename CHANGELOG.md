@@ -4,6 +4,19 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-23
+
+### Added
+
+- Use GitHub native auto-merge when the repository supports it, allowing GitHub to complete the merge while prWatcher is closed or the Mac is asleep.
+- Keep the existing polling-based Merge When Ready behavior as an automatic fallback, with a visible polling indicator.
+- Expand a PR row on single-click to show exact merge blockers, requested reviewers, review outcomes, unresolved conversations, and required versus informational CI checks.
+- Link individual CI checks to their GitHub details while loading expanded details only on demand to preserve polling quota.
+
+### Changed
+
+- Open PR pages from the context menu instead of opening them with a single row click.
+
 ## [0.6.2] - 2026-07-23
 
 ### Changed

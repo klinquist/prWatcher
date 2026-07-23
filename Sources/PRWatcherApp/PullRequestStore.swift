@@ -30,10 +30,20 @@ struct DashboardSectionPreference: Identifiable, Hashable, Codable {
     }
 }
 
+private enum MergeWhenReadyMode: String, Codable, Hashable {
+    case native
+    case pollingFallback
+}
+
 private struct MergeWhenReadyRegistration: Codable, Hashable {
     let pullRequestID: String
     let url: URL
     var wasReady: Bool
+    var mode: MergeWhenReadyMode?
+
+    var effectiveMode: MergeWhenReadyMode {
+        mode ?? .pollingFallback
+    }
 }
 
 private struct MergeWhenReadyOutcome {
@@ -67,6 +77,9 @@ final class PullRequestStore: ObservableObject {
     @Published private(set) var customSectionPullRequests: [UUID: [PullRequest]] = [:]
     @Published private(set) var sectionPreferences: [DashboardSectionPreference] = []
     @Published private(set) var refreshLogEntries: [PRRefreshLogEvent] = []
+    @Published private(set) var pullRequestDetails: [String: PullRequestDetails] = [:]
+    @Published private(set) var detailLoadingIDs = Set<String>()
+    @Published private(set) var detailErrors: [String: String] = [:]
     @Published private var mergeWhenReadyRegistrations: [String: MergeWhenReadyRegistration] = [:]
     @Published private(set) var selectedUserLogin: String?
     @Published private var unreadPullRequestIDs: [String: Set<String>] = [:]
@@ -952,14 +965,21 @@ final class PullRequestStore: ObservableObject {
 
     func merge(_ pullRequest: PullRequest) {
         guard pullRequest.viewerCanMerge else { return }
-        cancelMergeWhenReady(pullRequest)
+        mergeWhenReadyRegistrations.removeValue(forKey: pullRequest.id)
+        saveMergeWhenReadyRegistrations()
         performAction(on: pullRequest) { client, pullRequest in
             try await client.merge(pullRequest)
         }
     }
 
     func isMergeWhenReadyEnabled(_ pullRequest: PullRequest) -> Bool {
-        mergeWhenReadyRegistrations[pullRequest.id] != nil
+        mergeWhenReadyRegistrations[pullRequest.id] != nil || pullRequest.autoMergeEnabled
+    }
+
+    func usesPollingForMergeWhenReady(_ pullRequest: PullRequest) -> Bool {
+        guard !pullRequest.autoMergeEnabled,
+              let registration = mergeWhenReadyRegistrations[pullRequest.id] else { return false }
+        return registration.effectiveMode == .pollingFallback
     }
 
     func enableMergeWhenReady(_ pullRequest: PullRequest) {
@@ -968,25 +988,111 @@ final class PullRequestStore: ObservableObject {
               pullRequest.state != "CLOSED",
               pullRequest.state != "MERGED",
               pullRequest.mergedAt == nil else { return }
+        let supportsNativeAutoMerge = pullRequest.viewerCanEnableAutoMerge
+            && pullRequest.preferredMergeMethod != nil
+        let mode: MergeWhenReadyMode = supportsNativeAutoMerge ? .native : .pollingFallback
         mergeWhenReadyRegistrations[pullRequest.id] = MergeWhenReadyRegistration(
             pullRequestID: pullRequest.id,
             url: pullRequest.url,
-            wasReady: false
+            wasReady: false,
+            mode: mode
         )
         saveMergeWhenReadyRegistrations()
+
+        guard supportsNativeAutoMerge else {
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .info,
+                message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): GitHub native auto-merge is not available for this repository. Polling fallback enabled."
+            ))
+            return
+        }
+        guard !isOffline, let client else {
+            mergeWhenReadyRegistrations[pullRequest.id]?.mode = .pollingFallback
+            saveMergeWhenReadyRegistrations()
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .warning,
+                message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): offline, so the polling fallback was enabled. prWatcher will try to promote it to GitHub native auto-merge during a future poll."
+            ))
+            return
+        }
+
         appendRefreshLog(PRRefreshLogEvent(
             level: .info,
-            message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): enabled. Will merge automatically after a poll reports that approvals and required CI are ready."
+            message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): enabling GitHub native auto-merge…"
         ))
+        Task {
+            do {
+                try await client.enableAutoMerge(pullRequest)
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .success,
+                    message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): GitHub native auto-merge enabled. GitHub will merge this PR even while prWatcher is closed or the Mac is asleep."
+                ))
+            } catch {
+                guard mergeWhenReadyRegistrations[pullRequest.id] != nil else { return }
+                mergeWhenReadyRegistrations[pullRequest.id]?.mode = .pollingFallback
+                saveMergeWhenReadyRegistrations()
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .warning,
+                    message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): could not enable GitHub native auto-merge (\(error.localizedDescription)). Polling fallback remains enabled."
+                ))
+            }
+        }
     }
 
     func cancelMergeWhenReady(_ pullRequest: PullRequest) {
-        guard mergeWhenReadyRegistrations.removeValue(forKey: pullRequest.id) != nil else { return }
-        saveMergeWhenReadyRegistrations()
-        appendRefreshLog(PRRefreshLogEvent(
-            level: .info,
-            message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): canceled."
-        ))
+        let registration = mergeWhenReadyRegistrations[pullRequest.id]
+        let usesNativeAutoMerge = pullRequest.autoMergeEnabled
+            || registration?.effectiveMode == .native
+        guard usesNativeAutoMerge else {
+            guard mergeWhenReadyRegistrations.removeValue(forKey: pullRequest.id) != nil else { return }
+            saveMergeWhenReadyRegistrations()
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .info,
+                message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): polling fallback canceled."
+            ))
+            return
+        }
+        guard !isOffline, let client else {
+            errorMessage = "You’re offline. GitHub native auto-merge can be canceled after the network reconnects."
+            return
+        }
+        Task {
+            do {
+                try await client.disableAutoMerge(pullRequest)
+                mergeWhenReadyRegistrations.removeValue(forKey: pullRequest.id)
+                saveMergeWhenReadyRegistrations()
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .info,
+                    message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): GitHub native auto-merge canceled."
+                ))
+                await refreshUserWhenAvailable(login: selectedUserLogin)
+            } catch {
+                errorMessage = error.localizedDescription
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .error,
+                    message: "Merge When Ready — \(mergeWhenReadyLabel(for: pullRequest)): could not cancel GitHub native auto-merge: \(error.localizedDescription)"
+                ))
+            }
+        }
+    }
+
+    func loadDetails(for pullRequest: PullRequest, force: Bool = false) async {
+        if !force, pullRequestDetails[pullRequest.id] != nil { return }
+        guard !detailLoadingIDs.contains(pullRequest.id) else { return }
+        guard !isOffline, let client else {
+            detailErrors[pullRequest.id] = "Details are unavailable while offline."
+            return
+        }
+        detailLoadingIDs.insert(pullRequest.id)
+        detailErrors.removeValue(forKey: pullRequest.id)
+        defer { detailLoadingIDs.remove(pullRequest.id) }
+        do {
+            pullRequestDetails[pullRequest.id] = try await client.fetchPullRequestDetails(
+                url: pullRequest.url
+            )
+        } catch {
+            detailErrors[pullRequest.id] = error.localizedDescription
+        }
     }
 
     func copyLink(_ pullRequest: PullRequest) {
@@ -1151,6 +1257,61 @@ final class PullRequestStore: ObservableObject {
             guard var currentRegistration = mergeWhenReadyRegistrations[originalRegistration.pullRequestID] else {
                 continue
             }
+
+            if currentRegistration.effectiveMode == .native {
+                if pullRequest.autoMergeEnabled {
+                    let reason = pullRequest.mergeWhenReadyBlockerDescription
+                        ?? "waiting for GitHub to complete the merge"
+                    appendRefreshLog(PRRefreshLogEvent(
+                        level: .info,
+                        message: "Merge When Ready — \(label): GitHub native auto-merge is enabled; \(reason)."
+                    ))
+                    continue
+                }
+
+                if pullRequest.viewerCanEnableAutoMerge,
+                   pullRequest.preferredMergeMethod != nil {
+                    do {
+                        try await client.enableAutoMerge(pullRequest)
+                        appendRefreshLog(PRRefreshLogEvent(
+                            level: .success,
+                            message: "Merge When Ready — \(label): GitHub native auto-merge was re-enabled."
+                        ))
+                        continue
+                    } catch {
+                        appendRefreshLog(PRRefreshLogEvent(
+                            level: .warning,
+                            message: "Merge When Ready — \(label): could not re-enable GitHub native auto-merge (\(error.localizedDescription)). Polling fallback will remain active for this poll."
+                        ))
+                    }
+                } else {
+                    appendRefreshLog(PRRefreshLogEvent(
+                        level: .warning,
+                        message: "Merge When Ready — \(label): GitHub native auto-merge is no longer available for this repository. Switched to polling fallback."
+                    ))
+                }
+                currentRegistration.mode = .pollingFallback
+                mergeWhenReadyRegistrations[originalRegistration.pullRequestID] = currentRegistration
+            } else if pullRequest.viewerCanEnableAutoMerge,
+                      pullRequest.preferredMergeMethod != nil,
+                      !pullRequest.isReadyToMerge {
+                do {
+                    try await client.enableAutoMerge(pullRequest)
+                    currentRegistration.mode = .native
+                    mergeWhenReadyRegistrations[originalRegistration.pullRequestID] = currentRegistration
+                    appendRefreshLog(PRRefreshLogEvent(
+                        level: .success,
+                        message: "Merge When Ready — \(label): polling fallback was promoted to GitHub native auto-merge."
+                    ))
+                    continue
+                } catch {
+                    appendRefreshLog(PRRefreshLogEvent(
+                        level: .warning,
+                        message: "Merge When Ready — \(label): GitHub native auto-merge is available but could not be enabled (\(error.localizedDescription)). Polling fallback remains active."
+                    ))
+                }
+            }
+
             currentRegistration.wasReady = pullRequest.isReadyToMerge
             mergeWhenReadyRegistrations[originalRegistration.pullRequestID] = currentRegistration
             guard pullRequest.isReadyToMerge else {

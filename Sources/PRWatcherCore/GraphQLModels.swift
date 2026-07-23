@@ -113,6 +113,31 @@ struct WatchedRepository: Decodable {
     let pullRequest: PRNode?
 }
 
+struct PullRequestDetailsGraphQLResponse: Decodable {
+    let data: PullRequestDetailsGraphQLData?
+    let errors: [GraphQLError]?
+}
+
+struct PullRequestDetailsGraphQLData: Decodable {
+    let repository: PullRequestDetailsRepository?
+}
+
+struct PullRequestDetailsRepository: Decodable {
+    let pullRequest: PullRequestDetailsNode?
+}
+
+struct PullRequestDetailsNode: Decodable {
+    let isDraft: Bool
+    let reviewDecision: String?
+    let mergeable: String?
+    let mergeStateStatus: String?
+    let state: String?
+    let reviewRequests: ReviewRequestConnection
+    let latestReviews: LatestReviewConnection?
+    let reviewThreads: ReviewThreadConnection?
+    let commits: CommitConnection
+}
+
 struct UserProfileGraphQLResponse: Decodable {
     let data: UserProfileGraphQLData?
     let errors: [GraphQLError]?
@@ -177,6 +202,7 @@ struct PRNode: Decodable {
     let viewerCanClose: Bool?
     let viewerCanUpdate: Bool?
     let viewerCanEnableAutoMerge: Bool?
+    let autoMergeRequest: AutoMergeRequestNode?
     let author: LoginNode?
     let repository: RepositoryNode
     let assignees: LoginConnection
@@ -191,6 +217,13 @@ struct LoginNode: Decodable {
 struct RepositoryNode: Decodable {
     let nameWithOwner: String
     let viewerPermission: String?
+    let mergeCommitAllowed: Bool?
+    let squashMergeAllowed: Bool?
+    let rebaseMergeAllowed: Bool?
+}
+
+struct AutoMergeRequestNode: Decodable {
+    let mergeMethod: String?
 }
 
 struct LoginConnection: Decodable {
@@ -203,6 +236,24 @@ struct ReviewRequestConnection: Decodable {
 
 struct ReviewRequestNode: Decodable {
     let requestedReviewer: RequestedReviewer?
+}
+
+struct LatestReviewConnection: Decodable {
+    let nodes: [LatestReviewNode?]
+}
+
+struct LatestReviewNode: Decodable {
+    let state: String
+    let author: LoginNode?
+}
+
+struct ReviewThreadConnection: Decodable {
+    let totalCount: Int
+    let nodes: [ReviewThreadNode?]
+}
+
+struct ReviewThreadNode: Decodable {
+    let isResolved: Bool
 }
 
 struct RequestedReviewer: Decodable {
@@ -230,4 +281,28 @@ struct Commit: Decodable {
 
 struct StatusCheckRollup: Decodable {
     let state: String
+    let contexts: StatusCheckContextConnection?
+}
+
+struct StatusCheckContextConnection: Decodable {
+    let nodes: [StatusCheckContextNode?]
+}
+
+struct StatusCheckContextNode: Decodable {
+    let typeName: String
+    let name: String?
+    let context: String?
+    let status: String?
+    let conclusion: String?
+    let state: String?
+    let detailsURL: URL?
+    let targetURL: URL?
+    let isRequired: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case typeName = "__typename"
+        case name, context, status, conclusion, state, isRequired
+        case detailsURL = "detailsUrl"
+        case targetURL = "targetUrl"
+    }
 }

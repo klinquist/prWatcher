@@ -56,6 +56,20 @@ public enum AssignmentKind: Hashable, Codable, Sendable {
     }
 }
 
+public enum PullRequestMergeMethod: String, Hashable, Codable, Sendable {
+    case merge
+    case squash
+    case rebase
+
+    public var ghFlag: String {
+        switch self {
+        case .merge: "--merge"
+        case .squash: "--squash"
+        case .rebase: "--rebase"
+        }
+    }
+}
+
 public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
     public let id: String
     public let number: Int
@@ -75,6 +89,9 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
     public let viewerCanClose: Bool
     public let viewerCanUpdate: Bool
     public let viewerCanMerge: Bool
+    public let viewerCanEnableAutoMerge: Bool
+    public let autoMergeEnabled: Bool
+    public let preferredMergeMethod: PullRequestMergeMethod?
     public let assignment: AssignmentKind?
     public let section: PRSection
 
@@ -97,6 +114,9 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         viewerCanClose: Bool = false,
         viewerCanUpdate: Bool = false,
         viewerCanMerge: Bool = false,
+        viewerCanEnableAutoMerge: Bool = false,
+        autoMergeEnabled: Bool = false,
+        preferredMergeMethod: PullRequestMergeMethod? = .merge,
         assignment: AssignmentKind?,
         section: PRSection
     ) {
@@ -118,8 +138,51 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         self.viewerCanClose = viewerCanClose
         self.viewerCanUpdate = viewerCanUpdate
         self.viewerCanMerge = viewerCanMerge
+        self.viewerCanEnableAutoMerge = viewerCanEnableAutoMerge
+        self.autoMergeEnabled = autoMergeEnabled
+        self.preferredMergeMethod = preferredMergeMethod
         self.assignment = assignment
         self.section = section
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, number, title, url, repository, author, isDraft, createdAt, mergedAt
+        case updatedAt, reviewDecision, ciState, mergeable, mergeStateStatus, state
+        case viewerCanClose, viewerCanUpdate, viewerCanMerge, viewerCanEnableAutoMerge
+        case autoMergeEnabled, preferredMergeMethod, assignment, section
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        number = try container.decode(Int.self, forKey: .number)
+        title = try container.decode(String.self, forKey: .title)
+        url = try container.decode(URL.self, forKey: .url)
+        repository = try container.decode(String.self, forKey: .repository)
+        author = try container.decode(String.self, forKey: .author)
+        isDraft = try container.decode(Bool.self, forKey: .isDraft)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
+        mergedAt = try container.decodeIfPresent(Date.self, forKey: .mergedAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        reviewDecision = try container.decodeIfPresent(String.self, forKey: .reviewDecision)
+        ciState = try container.decodeIfPresent(String.self, forKey: .ciState)
+        mergeable = try container.decodeIfPresent(String.self, forKey: .mergeable)
+        mergeStateStatus = try container.decodeIfPresent(String.self, forKey: .mergeStateStatus)
+        state = try container.decodeIfPresent(String.self, forKey: .state)
+        viewerCanClose = try container.decodeIfPresent(Bool.self, forKey: .viewerCanClose) ?? false
+        viewerCanUpdate = try container.decodeIfPresent(Bool.self, forKey: .viewerCanUpdate) ?? false
+        viewerCanMerge = try container.decodeIfPresent(Bool.self, forKey: .viewerCanMerge) ?? false
+        viewerCanEnableAutoMerge = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .viewerCanEnableAutoMerge
+        ) ?? false
+        autoMergeEnabled = try container.decodeIfPresent(Bool.self, forKey: .autoMergeEnabled) ?? false
+        preferredMergeMethod = try container.decodeIfPresent(
+            PullRequestMergeMethod.self,
+            forKey: .preferredMergeMethod
+        ) ?? .merge
+        assignment = try container.decodeIfPresent(AssignmentKind.self, forKey: .assignment)
+        section = try container.decode(PRSection.self, forKey: .section)
     }
 
     public var stateDetail: String {
@@ -244,6 +307,9 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
             viewerCanClose: viewerCanClose,
             viewerCanUpdate: viewerCanUpdate,
             viewerCanMerge: viewerCanMerge,
+            viewerCanEnableAutoMerge: viewerCanEnableAutoMerge,
+            autoMergeEnabled: autoMergeEnabled,
+            preferredMergeMethod: preferredMergeMethod,
             assignment: nil,
             section: .watched
         )
@@ -269,9 +335,85 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
             viewerCanClose: false,
             viewerCanUpdate: false,
             viewerCanMerge: false,
+            viewerCanEnableAutoMerge: false,
+            autoMergeEnabled: false,
+            preferredMergeMethod: preferredMergeMethod,
             assignment: nil,
             section: .merged
         )
+    }
+}
+
+public struct PullRequestCheck: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let name: String
+    public let status: String
+    public let isRequired: Bool
+    public let detailsURL: URL?
+
+    public init(
+        id: String,
+        name: String,
+        status: String,
+        isRequired: Bool,
+        detailsURL: URL?
+    ) {
+        self.id = id
+        self.name = name
+        self.status = status
+        self.isRequired = isRequired
+        self.detailsURL = detailsURL
+    }
+
+    public var isSuccessful: Bool {
+        ["SUCCESS", "NEUTRAL", "SKIPPED"].contains(status)
+    }
+
+    public var isFailing: Bool {
+        [
+            "ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE",
+            "STARTUP_FAILURE", "TIMED_OUT",
+        ].contains(status)
+    }
+
+    public var isPending: Bool {
+        !isSuccessful && !isFailing
+    }
+}
+
+public struct PullRequestReview: Identifiable, Hashable, Sendable {
+    public var id: String { "\(reviewer.lowercased())|\(state)" }
+    public let reviewer: String
+    public let state: String
+
+    public init(reviewer: String, state: String) {
+        self.reviewer = reviewer
+        self.state = state
+    }
+}
+
+public struct PullRequestDetails: Hashable, Sendable {
+    public let requestedReviewers: [String]
+    public let reviews: [PullRequestReview]
+    public let checks: [PullRequestCheck]
+    public let unresolvedReviewThreadCount: Int
+    public let totalReviewThreadCount: Int
+    public let blockerReasons: [String]
+
+    public init(
+        requestedReviewers: [String],
+        reviews: [PullRequestReview],
+        checks: [PullRequestCheck],
+        unresolvedReviewThreadCount: Int,
+        totalReviewThreadCount: Int,
+        blockerReasons: [String]
+    ) {
+        self.requestedReviewers = requestedReviewers
+        self.reviews = reviews
+        self.checks = checks
+        self.unresolvedReviewThreadCount = unresolvedReviewThreadCount
+        self.totalReviewThreadCount = totalReviewThreadCount
+        self.blockerReasons = blockerReasons
     }
 }
 
