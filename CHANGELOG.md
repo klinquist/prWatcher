@@ -4,6 +4,19 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-23
+
+### Added
+
+- Configure separate automatic refresh schedules for active and locked/inactive user sessions, including an option to pause polling while locked.
+- Add Developer ID signing, DMG notarization, and GitHub release scripts backed by Keychain or environment-provided credentials.
+- Add an optional one-time preference migration script for the new bundle identifier.
+
+### Changed
+
+- Change the bundle identifier to `com.linquist.prwatcher`.
+- Automatically migrate preferences from both prior local bundle identifiers on first launch.
+
 ## [0.3.2] - 2026-07-22
 
 ### Fixed

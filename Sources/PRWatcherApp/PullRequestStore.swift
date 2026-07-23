@@ -50,6 +50,7 @@ final class PullRequestStore: ObservableObject {
     @Published private(set) var pullRequests: [PullRequest] = []
     @Published private(set) var isRefreshing = false
     @Published private(set) var isOffline = false
+    @Published private(set) var isSessionInactive = false
     @Published private(set) var viewerLogin: String?
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var availableOrganizations: [String] = []
@@ -68,6 +69,7 @@ final class PullRequestStore: ObservableObject {
 
     private var client: GitHubClient?
     private var timer: Timer?
+    private var workspaceObservers: [NSObjectProtocol] = []
     private let networkMonitor = NWPathMonitor()
     private let networkMonitorQueue = DispatchQueue(label: "com.prwatcher.network-monitor")
     private var hasReceivedNetworkStatus = false
@@ -130,12 +132,17 @@ final class PullRequestStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+        startSessionMonitoring()
         configurePolling()
         startNetworkMonitoring()
     }
 
     deinit {
         timer?.invalidate()
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers {
+            notificationCenter.removeObserver(observer)
+        }
         networkMonitor.cancel()
     }
 
@@ -191,6 +198,46 @@ final class PullRequestStore: ObservableObject {
         networkMonitor.start(queue: networkMonitorQueue)
     }
 
+    private func startSessionMonitoring() {
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        workspaceObservers = [
+            notificationCenter.addObserver(
+                forName: NSWorkspace.sessionDidResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.sessionActivityDidChange(isInactive: true)
+                }
+            },
+            notificationCenter.addObserver(
+                forName: NSWorkspace.sessionDidBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.sessionActivityDidChange(isInactive: false)
+                }
+            },
+        ]
+    }
+
+    private func sessionActivityDidChange(isInactive: Bool) {
+        guard isSessionInactive != isInactive else { return }
+        isSessionInactive = isInactive
+        configurePolling()
+
+        let scheduleDescription = activePollingIntervalMinutes.map {
+            "every \(Int($0)) minute\(Int($0) == 1 ? "" : "s")"
+        } ?? "paused"
+        appendRefreshLog(PRRefreshLogEvent(
+            level: .info,
+            message: isInactive
+                ? "Mac locked or user session inactive. Automatic polling is \(scheduleDescription)."
+                : "User session active. Automatic polling is \(scheduleDescription)."
+        ))
+    }
+
     private func networkStatusDidChange(isOnline: Bool) {
         let isInitialStatus = !hasReceivedNetworkStatus
         let wasOffline = isOffline
@@ -227,13 +274,25 @@ final class PullRequestStore: ObservableObject {
 
     func configurePolling() {
         timer?.invalidate()
-        let minutes = max(UserDefaults.standard.double(forKey: "pollIntervalMinutes"), 1)
-        let effectiveMinutes = UserDefaults.standard.object(forKey: "pollIntervalMinutes") == nil ? 3 : minutes
-        timer = Timer.scheduledTimer(withTimeInterval: effectiveMinutes * 60, repeats: true) { [weak self] _ in
+        timer = nil
+        guard let minutes = activePollingIntervalMinutes else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: minutes * 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.refreshUser(login: nil)
             }
         }
+    }
+
+    private var activePollingIntervalMinutes: Double? {
+        let defaults = UserDefaults.standard
+        if isSessionInactive {
+            guard defaults.object(forKey: "lockedPollIntervalMinutes") != nil else { return 15 }
+            let minutes = defaults.double(forKey: "lockedPollIntervalMinutes")
+            return minutes <= 0 ? nil : min(max(minutes, 1), 120)
+        }
+
+        guard defaults.object(forKey: "pollIntervalMinutes") != nil else { return 3 }
+        return min(max(defaults.double(forKey: "pollIntervalMinutes"), 1), 60)
     }
 
     func refresh() async {

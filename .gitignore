@@ -9,6 +9,7 @@
 
 # Xcode user and build data
 DerivedData/
+.derived-*/
 xcuserdata/
 *.xcuserstate
 *.xccheckout
@@ -31,6 +32,8 @@ dist/
 .env
 .env.*
 !.env.example
+scripts/release.local.env
+*.p8
 *.cer
 *.p12
 *.mobileprovision

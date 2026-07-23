@@ -7,6 +7,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var store: PullRequestStore
     @AppStorage("pollIntervalMinutes") private var pollIntervalMinutes = 3.0
+    @AppStorage("lockedPollIntervalMinutes") private var lockedPollIntervalMinutes = 15.0
     @AppStorage("selectedOrganization") private var selectedOrganization = ""
     @AppStorage("assignmentScope") private var assignmentScope = "directAndTeam"
     @AppStorage("alwaysOnTop") private var alwaysOnTop = false
@@ -171,16 +172,32 @@ struct SettingsView: View {
 
             Section("GitHub polling") {
                 HStack {
-                    Text("Refresh every")
+                    Text("While unlocked")
                     Spacer()
                     Stepper(
                         "\(Int(pollIntervalMinutes)) minutes",
                         value: $pollIntervalMinutes,
-                        in: 1...30,
+                        in: 1...60,
                         step: 1
                     )
                     .frame(width: 170)
                 }
+                HStack {
+                    Text("While locked")
+                    Spacer()
+                    Stepper(
+                        lockedPollIntervalMinutes == 0
+                            ? "Paused"
+                            : "\(Int(lockedPollIntervalMinutes)) minutes",
+                        value: $lockedPollIntervalMinutes,
+                        in: 0...120,
+                        step: 5
+                    )
+                    .frame(width: 170)
+                }
+                Text("The locked schedule is also used while your macOS user session is inactive. Set it to Paused to avoid automatic GitHub requests until you return.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Text("Automatic polling applies only to Me. Teammates are refreshed once when selected or when you press Refresh.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -208,6 +225,9 @@ struct SettingsView: View {
             store.assignmentScopeDidChange()
         }
         .onChange(of: pollIntervalMinutes) { _, _ in
+            store.configurePolling()
+        }
+        .onChange(of: lockedPollIntervalMinutes) { _, _ in
             store.configurePolling()
         }
         .onChange(of: hideDockIcon) { _, isHidden in

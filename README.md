@@ -6,7 +6,7 @@
 
 prWatcher is a compact native macOS dashboard for the GitHub pull requests that need your attention. It lives comfortably in a corner of the display, talks to GitHub through your existing `gh` CLI login, and keeps useful results visible even when GitHub—or your network—is unavailable.
 
-Current version: **0.3.2**
+Current version: **0.4.0**
 
 Created by **Kristopher Linquist**.
 
@@ -69,7 +69,7 @@ A permission-aware **Merge** button appears on PRs that are ready. **Merge When 
 
 ## Refreshing, caching, and offline behavior
 
-- The refresh interval is configurable in Settings and defaults to three minutes.
+- Separate refresh intervals are configurable for unlocked and locked/inactive macOS sessions. They default to three and fifteen minutes respectively, and locked polling can be paused entirely.
 - GitHub calls use `gh api graphql`, so prWatcher uses your existing GitHub CLI authentication.
 - Built-in categories use separate, bounded API calls to avoid oversized shared requests.
 - Results appear progressively as calls complete, while existing rows stay visible to prevent layout jumps.
@@ -107,6 +107,15 @@ Confirm GitHub CLI access with:
 gh auth status
 ```
 
+## Install a release
+
+1. Download `prWatcher-<version>-macOS.dmg` from the project’s GitHub Releases page.
+2. Open the downloaded DMG.
+3. Drag **prWatcher** onto the **Applications** shortcut in the DMG window.
+4. Eject the prWatcher disk image, then open prWatcher from Applications.
+
+Release DMGs are Developer ID signed and notarized by Apple. The app still requires a local, authenticated `gh` CLI installation; no GitHub token is bundled into the download.
+
 ## Build and run
 
 Open the native project in Xcode:
@@ -137,7 +146,36 @@ swift test
 
 ## Distribution
 
-Another Mac can run a copied `prWatcher.app`, but an ad-hoc signed build may trigger Gatekeeper warnings. For broad distribution, sign with a Developer ID certificate and notarize the app with Apple.
+The release workflow builds a universal Developer ID-signed app, creates a standard drag-to-Applications DMG, submits it to Apple’s notary service, staples the ticket, verifies it with Gatekeeper, and uploads the DMG to a GitHub release.
+
+Keep release credentials outside Git. The preferred setup stores notarization credentials in the login Keychain:
+
+```sh
+xcrun notarytool store-credentials prwatcher
+cp scripts/release.local.env.example scripts/release.local.env
+```
+
+Set your Apple Developer Team ID in `scripts/release.local.env`, then publish the version in `VERSION`:
+
+```sh
+./scripts/release-github.sh
+```
+
+`scripts/release.local.env`, `.p8` keys, certificates, provisioning profiles, derived data, and built artifacts are ignored by Git. As an alternative to a Keychain profile, the scripts accept `ASC_KEY_PATH`, `ASC_KEY_ID`, and `ASC_ISSUER_ID`; the key file should live outside this repository.
+
+If an existing project already has an untracked release environment file, set `LOCAL_RELEASE_ENV` to that absolute path instead of copying any credentials.
+
+## Bundle identifier and preference migration
+
+The bundle identifier is `com.linquist.prwatcher`. On its first launch, prWatcher automatically copies any existing preferences from `com.local.prWatcher` and the older `com.local.prVisualizer` domain, without replacing preferences already written under the new identifier.
+
+If you prefer to migrate before launching the new app, quit prWatcher and run:
+
+```sh
+./scripts/migrate-preferences.sh
+```
+
+The one-time script refuses to overwrite an existing `com.linquist.prwatcher` preference domain. Its optional `--force` flag is intentionally required to replace that domain.
 
 ## Versioning
 

@@ -40,6 +40,7 @@ stop_running_app() {
     pkill -x "$process_name" || true
 }
 
+stop_running_app prWatcher com.linquist.prwatcher
 stop_running_app prWatcher com.local.prWatcher
 stop_running_app prVisualizer com.local.prVisualizer
 

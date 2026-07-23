@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>prWatcher</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.prWatcher</string>
+    <string>com.linquist.prwatcher</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.2</string>
+    <string>0.4.0</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHumanReadableCopyright</key>

@@ -38,17 +38,24 @@ struct PRWatcherApp: App {
 }
 
 private enum LegacyPreferencesMigrator {
-    private static let legacyBundleIdentifier = "com.local.prVisualizer"
-    private static let migrationKey = "didMigrateLegacyPreferences"
+    private static let legacyBundleIdentifiers = [
+        "com.local.prWatcher",
+        "com.local.prVisualizer",
+    ]
 
     static func migrateIfNeeded() {
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: migrationKey) else { return }
-        defer { defaults.set(true, forKey: migrationKey) }
-        guard let legacyPreferences = defaults.persistentDomain(forName: legacyBundleIdentifier) else { return }
+        for legacyBundleIdentifier in legacyBundleIdentifiers {
+            let migrationKey = "didMigratePreferencesFrom.\(legacyBundleIdentifier)"
+            guard !defaults.bool(forKey: migrationKey) else { continue }
+            defer { defaults.set(true, forKey: migrationKey) }
+            guard let legacyPreferences = defaults.persistentDomain(
+                forName: legacyBundleIdentifier
+            ) else { continue }
 
-        for (key, value) in legacyPreferences where defaults.object(forKey: key) == nil {
-            defaults.set(value, forKey: key)
+            for (key, value) in legacyPreferences where defaults.object(forKey: key) == nil {
+                defaults.set(value, forKey: key)
+            }
         }
     }
 }
