@@ -4,6 +4,10 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+### Added
+
+- Add a persistent option to hide prWatcher from the Dock and app switcher.
+
 ## [0.2.0] - 2026-07-22
 
 ### Added

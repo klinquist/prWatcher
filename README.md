@@ -90,6 +90,7 @@ macOS Focus and notification settings still control whether alerts are delivered
 - Starts at approximately 400 × 900 points near the upper-right of the screen.
 - Remains fully resizable.
 - Can stay above other apps with **Keep window above other apps** in Settings.
+- Can hide its Dock and app-switcher icon while keeping the dashboard window available.
 - Shows each PR’s relative opened time, rounded to the minute.
 - Shows the GitHub author on PRs not authored by the signed-in user, including Watched, Custom, Assigned, and teammate rows.
 - Includes a native app icon and a quiet, non-animated refresh status.

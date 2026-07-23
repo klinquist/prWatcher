@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("selectedOrganization") private var selectedOrganization = ""
     @AppStorage("assignmentScope") private var assignmentScope = "directAndTeam"
     @AppStorage("alwaysOnTop") private var alwaysOnTop = false
+    @AppStorage(DockIconVisibility.preferenceKey) private var hideDockIcon = false
     @State private var newGitHubLogin = ""
     @State private var teamMemberError: String?
     @State private var isAddingTeamMember = false
@@ -187,6 +188,10 @@ struct SettingsView: View {
 
             Section("Window") {
                 Toggle("Keep window above other apps", isOn: $alwaysOnTop)
+                Toggle("Hide Dock icon", isOn: $hideDockIcon)
+                Text("When hidden, prWatcher also stays out of the app switcher. Relaunch prWatcher from Applications to bring its window back.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -204,6 +209,9 @@ struct SettingsView: View {
         }
         .onChange(of: pollIntervalMinutes) { _, _ in
             store.configurePolling()
+        }
+        .onChange(of: hideDockIcon) { _, isHidden in
+            DockIconVisibility.apply(isHidden: isHidden)
         }
         .sheet(item: $editingCustomSection) { section in
             CustomSectionEditor(

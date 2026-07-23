@@ -54,6 +54,12 @@ private enum LegacyPreferencesMigrator {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        DockIconVisibility.apply(
+            isHidden: UserDefaults.standard.bool(forKey: DockIconVisibility.preferenceKey)
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if AppRuntime.supportsUserNotifications {
             UNUserNotificationCenter.current().delegate = self
@@ -64,6 +70,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             guard let window = NSApplication.shared.windows.first(where: { $0.canBecomeMain }) else { return }
             Self.moveToTopRight(window)
         }
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag, let window = sender.windows.first(where: { $0.canBecomeMain }) {
+            window.makeKeyAndOrderFront(nil)
+            sender.activate(ignoringOtherApps: true)
+        }
+        return true
     }
 
     func userNotificationCenter(
@@ -86,6 +103,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             y: visible.maxY - window.frame.height - 12
         )
         window.setFrameOrigin(origin)
+    }
+}
+
+enum DockIconVisibility {
+    static let preferenceKey = "hideDockIcon"
+
+    static func apply(isHidden: Bool) {
+        NSApplication.shared.setActivationPolicy(isHidden ? .accessory : .regular)
+        if !isHidden {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
     }
 }
 
