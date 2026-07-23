@@ -2,6 +2,14 @@
 
 All notable changes to prWatcher are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.2.0] - 2026-07-22
+
+### Added
+
+- Display the GitHub author alongside the opened time on PR rows not authored by the signed-in user.
+
 ## [0.1.0] - 2026-07-22
 
 ### Added

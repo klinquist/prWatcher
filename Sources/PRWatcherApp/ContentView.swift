@@ -513,10 +513,17 @@ private struct PullRequestRow: View {
 
                         if let createdAt = pullRequest.createdAt {
                             TimelineView(.periodic(from: createdAt, by: 60)) { context in
-                                Text("Opened \(minuteRoundedAge(since: createdAt, relativeTo: context.date))")
+                                Text(
+                                    "Opened \(minuteRoundedAge(since: createdAt, relativeTo: context.date))"
+                                        + (shouldShowAuthor ? " by @\(pullRequest.author)" : "")
+                                )
                             }
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                        } else if shouldShowAuthor {
+                            Text("By @\(pullRequest.author)")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                         }
 
                         if store.isMergeWhenReadyEnabled(pullRequest) {
@@ -612,6 +619,11 @@ private struct PullRequestRow: View {
         pullRequest.state != "CLOSED"
             && pullRequest.state != "MERGED"
             && pullRequest.mergedAt == nil
+    }
+
+    private var shouldShowAuthor: Bool {
+        guard let viewerLogin = store.viewerLogin, !viewerLogin.isEmpty else { return true }
+        return pullRequest.author.caseInsensitiveCompare(viewerLogin) != .orderedSame
     }
 
     private var hasManageActions: Bool {
