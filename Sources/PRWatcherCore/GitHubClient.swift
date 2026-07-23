@@ -63,6 +63,7 @@ public struct GitHubClient: Sendable {
         authorLogin: String? = nil,
         customSections: [CustomPRSection] = [],
         includedSections: Set<PRSection> = Set(PRSection.allCases.filter { $0 != .custom }),
+        includeTeamReviewRequests: Bool = true,
         onLog: (@Sendable (PRRefreshLogEvent) -> Void)? = nil,
         onUpdate: (@Sendable (PRFetchUpdate) async -> Void)? = nil
     ) async throws -> PRSnapshot {
@@ -200,32 +201,45 @@ public struct GitHubClient: Sendable {
                     assignedQueriesSucceeded = false
                 }
 
-                do {
-                    let reviewResult = try Self.fetchSearchInSmallPages(
-                        executableURL: executableURL,
-                        query: "is:pr is:open review-requested:@me -author:@me archived:false\(organizationQualifier) sort:updated-desc",
-                        maximumCount: 50,
-                        pageSize: 10,
-                        logLabel: "Assigned to me — review requests",
-                        onLog: onLog
-                    )
-                    viewer = reviewResult.viewer
-                    reviewRequested = reviewResult.nodes
-                    if let onUpdate {
-                        await onUpdate(PRFetchUpdate(
-                            snapshot: Self.makeSnapshot(
-                                viewer: viewer,
-                                authored: authored,
-                                assigned: assigned,
-                                reviewRequested: reviewRequested,
-                                merged: merged,
-                                includedSections: includedSections
-                            ),
-                            refreshedSections: refreshedSections.union([.assigned])
-                        ))
+                if let reviewQualifier = Self.reviewRequestQualifier(
+                    includeTeamReviewRequests: includeTeamReviewRequests,
+                    viewerLogin: viewer
+                ) {
+                    do {
+                        let reviewResult = try Self.fetchSearchInSmallPages(
+                            executableURL: executableURL,
+                            query: "is:pr is:open \(reviewQualifier) -author:@me archived:false\(organizationQualifier) sort:updated-desc",
+                            maximumCount: 50,
+                            pageSize: 10,
+                            logLabel: includeTeamReviewRequests
+                                ? "Assigned to me — review requests, including teams"
+                                : "Assigned to me — direct review requests",
+                            onLog: onLog
+                        )
+                        viewer = reviewResult.viewer
+                        reviewRequested = reviewResult.nodes
+                        if let onUpdate {
+                            await onUpdate(PRFetchUpdate(
+                                snapshot: Self.makeSnapshot(
+                                    viewer: viewer,
+                                    authored: authored,
+                                    assigned: assigned,
+                                    reviewRequested: reviewRequested,
+                                    merged: merged,
+                                    includedSections: includedSections
+                                ),
+                                refreshedSections: refreshedSections.union([.assigned])
+                            ))
+                        }
+                    } catch where Self.isTransientGatewayError(error.localizedDescription) {
+                        assignedQueriesSucceeded = false
                     }
-                } catch where Self.isTransientGatewayError(error.localizedDescription) {
+                } else {
                     assignedQueriesSucceeded = false
+                    onLog?(PRRefreshLogEvent(
+                        level: .warning,
+                        message: "Assigned to me — direct review requests skipped because the signed-in GitHub username was unavailable."
+                    ))
                 }
 
                 if assignedQueriesSucceeded {
@@ -346,6 +360,17 @@ public struct GitHubClient: Sendable {
         case .watched, .merged, .assigned, .custom:
             return ""
         }
+    }
+
+    static func reviewRequestQualifier(
+        includeTeamReviewRequests: Bool,
+        viewerLogin: String
+    ) -> String? {
+        if includeTeamReviewRequests {
+            return "review-requested:@me"
+        }
+        guard let login = normalizedGitHubLogin(viewerLogin) else { return nil }
+        return "review-requested:\(login)"
     }
 
     public func fetchUserProfile(login: String) async throws -> GitHubUserProfile {

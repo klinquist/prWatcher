@@ -253,6 +253,8 @@ final class PullRequestStore: ObservableObject {
                 authorLogin: requestedUserLogin,
                 customSections: requestedUserLogin == nil ? enabledCustomSections : [],
                 includedSections: enabledBuiltInSections,
+                includeTeamReviewRequests: UserDefaults.standard.string(forKey: "assignmentScope")
+                    != "directOnly",
                 onLog: { [weak self] event in
                     Task { @MainActor [weak self] in
                         self?.appendRefreshLog(event)

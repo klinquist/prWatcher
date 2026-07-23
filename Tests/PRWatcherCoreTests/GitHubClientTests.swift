@@ -142,6 +142,22 @@ func authoredSectionSearchQualifiers() {
     #expect(GitHubClient.authoredSearchQualifier(for: .waitingForReview) == "draft:false")
 }
 
+@Test("Direct review requests use the explicit viewer login")
+func directReviewRequestQualifier() {
+    #expect(GitHubClient.reviewRequestQualifier(
+        includeTeamReviewRequests: false,
+        viewerLogin: "Octo-Cat"
+    ) == "review-requested:Octo-Cat")
+    #expect(GitHubClient.reviewRequestQualifier(
+        includeTeamReviewRequests: false,
+        viewerLogin: ""
+    ) == nil)
+    #expect(GitHubClient.reviewRequestQualifier(
+        includeTeamReviewRequests: true,
+        viewerLogin: "Octo-Cat"
+    ) == "review-requested:@me")
+}
+
 @Test("Custom searches imply pull requests without rewriting the query")
 func customSearchQuery() {
     let query = "is:open team-review-requested:verkada/web-access draft:false"

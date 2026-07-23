@@ -4,9 +4,15 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-22
+
 ### Added
 
 - Add a persistent option to hide prWatcher from the Dock and app switcher.
+
+### Fixed
+
+- Query direct review requests by explicit GitHub username so team review requests are not fetched and discarded in direct-only mode.
 
 ## [0.2.0] - 2026-07-22
 
