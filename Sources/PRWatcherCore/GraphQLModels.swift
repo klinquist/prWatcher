@@ -15,6 +15,69 @@ struct SearchGraphQLData: Decodable {
     let results: PRConnection
 }
 
+struct NodesGraphQLResponse: Decodable {
+    let data: NodesGraphQLData?
+    let errors: [GraphQLError]?
+}
+
+struct NodesGraphQLData: Decodable {
+    let viewer: Viewer
+    let nodes: [PRNode?]
+}
+
+struct DirectReviewCandidatesGraphQLResponse: Decodable {
+    let data: DirectReviewCandidatesGraphQLData?
+    let errors: [GraphQLError]?
+}
+
+struct DirectReviewCandidatesGraphQLData: Decodable {
+    let viewer: Viewer
+    let nodes: [DirectReviewCandidateNode?]
+}
+
+struct DirectReviewCandidateNode: Decodable {
+    let id: String
+    let state: String
+    let author: LoginNode?
+    let reviewRequests: ReviewRequestConnection
+}
+
+struct PullRequestSearchRESTResponse: Decodable {
+    let totalCount: Int
+    let incompleteResults: Bool
+    let items: [PullRequestSearchRESTItem]
+
+    private enum CodingKeys: String, CodingKey {
+        case totalCount = "total_count"
+        case incompleteResults = "incomplete_results"
+        case items
+    }
+}
+
+struct PullRequestSearchRESTItem: Decodable {
+    let nodeID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case nodeID = "node_id"
+    }
+}
+
+struct RateLimitRESTResponse: Decodable {
+    let resources: RateLimitResources
+}
+
+struct RateLimitResources: Decodable {
+    let graphql: RateLimitResource
+    let search: RateLimitResource
+}
+
+struct RateLimitResource: Decodable {
+    let limit: Int
+    let used: Int
+    let remaining: Int
+    let reset: TimeInterval
+}
+
 struct SearchCountGraphQLResponse: Decodable {
     let data: SearchCountGraphQLData?
     let errors: [GraphQLError]?

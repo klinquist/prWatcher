@@ -4,6 +4,24 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-23
+
+### Added
+
+- Add a configurable local-time polling sleep window, enabled by default from 7:00 PM to 7:00 AM.
+- Add Settings quota checks for both GitHub GraphQL points and the separate REST search allowance, including reset times and the measured cost of the latest refresh.
+
+### Changed
+
+- Pace or defer automatic polling when measured refresh cost and remaining GitHub quota indicate that the configured interval is unsafe.
+- Limit review-request discovery to PRs updated during the past 14 days.
+- Replace rich GraphQL review searches with lightweight REST candidate discovery and batched GraphQL hydration.
+- Incrementally scan direct review requests between hourly full reconciliations while revalidating cached direct requests on every poll.
+
+### Fixed
+
+- Distinguish direct user review requests from requests inherited through GitHub teams without repeatedly resolving hundreds of team candidates in one GraphQL search.
+
 ## [0.5.0] - 2026-07-23
 
 ### Added

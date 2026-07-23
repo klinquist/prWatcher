@@ -9,6 +9,9 @@ struct SettingsView: View {
     @ObservedObject var store: PullRequestStore
     @AppStorage("pollIntervalMinutes") private var pollIntervalMinutes = 3.0
     @AppStorage("lockedPollIntervalMinutes") private var lockedPollIntervalMinutes = 15.0
+    @AppStorage("pollingSleepEnabled") private var pollingSleepEnabled = true
+    @AppStorage("pollingSleepStartMinutes") private var pollingSleepStartMinutes = 19 * 60
+    @AppStorage("pollingSleepEndMinutes") private var pollingSleepEndMinutes = 7 * 60
     @AppStorage("selectedOrganization") private var selectedOrganization = ""
     @AppStorage("assignmentScope") private var assignmentScope = "directAndTeam"
     @AppStorage("alwaysOnTop") private var alwaysOnTop = false
@@ -205,6 +208,68 @@ struct SettingsView: View {
                 Text("Automatic polling applies only to Me. Teammates are refreshed once when selected or when you press Refresh.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Toggle("Pause automatic polling during sleep hours", isOn: $pollingSleepEnabled)
+                if pollingSleepEnabled {
+                    Picker("Sleep starts", selection: $pollingSleepStartMinutes) {
+                        ForEach(pollingTimeChoices, id: \.self) { minutes in
+                            Text(pollingTimeLabel(minutes)).tag(minutes)
+                        }
+                    }
+                    Picker("Sleep ends", selection: $pollingSleepEndMinutes) {
+                        ForEach(pollingTimeChoices, id: \.self) { minutes in
+                            Text(pollingTimeLabel(minutes)).tag(minutes)
+                        }
+                    }
+                    Text(pollingSleepStartMinutes == pollingSleepEndMinutes
+                        ? "Choose different start and end times to enable the sleep window."
+                         : "Automatic refreshes pause during this local-time window. Manual Refresh remains available.")
+                        .font(.caption)
+                        .foregroundStyle(
+                            pollingSleepStartMinutes == pollingSleepEndMinutes
+                                ? Color.orange
+                                : Color.secondary
+                        )
+                }
+
+                Divider()
+
+                HStack {
+                    Button("Check GitHub Quota") {
+                        Task { await store.checkRateLimit() }
+                    }
+                    .disabled(store.isCheckingRateLimit || store.isOffline)
+                    if store.isCheckingRateLimit {
+                        ProgressView().controlSize(.small)
+                    }
+                    Spacer()
+                    if let cost = store.lastRefreshGraphQLCost {
+                        Text("Last refresh: \(cost) GraphQL point\(cost == 1 ? "" : "s")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let quota = store.rateLimitStatus {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("GraphQL: \(quota.remaining.formatted()) of \(quota.limit.formatted()) remaining")
+                        ProgressView(
+                            value: Double(quota.remaining),
+                            total: Double(max(quota.limit, 1))
+                        )
+                        Text("Resets \(quota.resetAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("REST search: \(quota.searchRemaining) of \(quota.searchLimit) remaining; resets \(quota.searchResetAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let quotaError = store.rateLimitError {
+                    Text(quotaError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
 
             Section("Window") {
@@ -239,7 +304,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 640)
+        .frame(width: 500, height: 760)
         .task {
             refreshLaunchAtLoginStatus()
             if store.availableOrganizations.isEmpty {
@@ -253,10 +318,19 @@ struct SettingsView: View {
             store.assignmentScopeDidChange()
         }
         .onChange(of: pollIntervalMinutes) { _, _ in
-            store.configurePolling()
+            store.pollingPreferencesDidChange()
         }
         .onChange(of: lockedPollIntervalMinutes) { _, _ in
-            store.configurePolling()
+            store.pollingPreferencesDidChange()
+        }
+        .onChange(of: pollingSleepEnabled) { _, _ in
+            store.pollingPreferencesDidChange()
+        }
+        .onChange(of: pollingSleepStartMinutes) { _, _ in
+            store.pollingPreferencesDidChange()
+        }
+        .onChange(of: pollingSleepEndMinutes) { _, _ in
+            store.pollingPreferencesDidChange()
         }
         .onChange(of: hideDockIcon) { _, isHidden in
             DockIconVisibility.apply(isHidden: isHidden)
@@ -290,6 +364,18 @@ struct SettingsView: View {
             return store.availableOrganizations
         }
         return ([selectedOrganization] + store.availableOrganizations).sorted()
+    }
+
+    private var pollingTimeChoices: [Int] {
+        Array(stride(from: 0, through: 23 * 60 + 30, by: 30))
+    }
+
+    private func pollingTimeLabel(_ minutes: Int) -> String {
+        var calendar = Calendar.current
+        calendar.timeZone = .current
+        let startOfDay = calendar.startOfDay(for: Date())
+        let date = calendar.date(byAdding: .minute, value: minutes, to: startOfDay) ?? startOfDay
+        return date.formatted(date: .omitted, time: .shortened)
     }
 
     private func addTeamMember() {

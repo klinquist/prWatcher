@@ -173,7 +173,8 @@ struct ContentView: View {
 
     @ViewBuilder
     private var refreshStatus: some View {
-        if store.isOffline || store.isRefreshing || store.lastUpdated != nil || !store.refreshLogEntries.isEmpty {
+        if store.isOffline || store.isRefreshing || store.isPollingSleeping
+            || store.lastUpdated != nil || !store.refreshLogEntries.isEmpty {
             Button {
                 isPresentingRefreshLog = true
             } label: {
@@ -183,6 +184,12 @@ struct ContentView: View {
                         Label("Offline — refresh paused", systemImage: "wifi.slash")
                     } else if store.isRefreshing {
                         Text("Refreshing…")
+                    } else if store.isPollingSleeping,
+                              let wakeDate = store.nextAutomaticRefreshDate {
+                        Label(
+                            "Polling asleep until \(wakeDate.formatted(date: .omitted, time: .shortened))",
+                            systemImage: "moon.zzz"
+                        )
                     } else if let lastUpdated = store.lastUpdated {
                         TimelineView(.periodic(from: lastUpdated, by: 60)) { context in
                             Text("Last updated \(minuteRoundedAge(since: lastUpdated, relativeTo: context.date))")

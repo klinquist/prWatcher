@@ -51,6 +51,12 @@ final class PullRequestStore: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var isOffline = false
     @Published private(set) var isSessionInactive = false
+    @Published private(set) var isPollingSleeping = false
+    @Published private(set) var nextAutomaticRefreshDate: Date?
+    @Published private(set) var rateLimitStatus: GitHubRateLimitStatus?
+    @Published private(set) var lastRefreshGraphQLCost: Int?
+    @Published private(set) var isCheckingRateLimit = false
+    @Published private(set) var rateLimitError: String?
     @Published private(set) var viewerLogin: String?
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var availableOrganizations: [String] = []
@@ -70,6 +76,7 @@ final class PullRequestStore: ObservableObject {
     private var client: GitHubClient?
     private var timer: Timer?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var systemTimeObservers: [NSObjectProtocol] = []
     private let networkMonitor = NWPathMonitor()
     private let networkMonitorQueue = DispatchQueue(label: "com.prwatcher.network-monitor")
     private var hasReceivedNetworkStatus = false
@@ -82,6 +89,7 @@ final class PullRequestStore: ObservableObject {
     private var cacheGeneration = 0
     private var knownPullRequestIDs: [String: Set<String>] = [:]
     private var mergeWhenReadyInFlight = Set<String>()
+    private var quotaDeferredUntil: Date?
 
     init() {
         watchedURLs = (UserDefaults.standard.stringArray(forKey: "watchedPullRequestURLs") ?? [])
@@ -133,6 +141,7 @@ final class PullRequestStore: ObservableObject {
             errorMessage = error.localizedDescription
         }
         startSessionMonitoring()
+        startSystemTimeMonitoring()
         configurePolling()
         startNetworkMonitoring()
     }
@@ -142,6 +151,9 @@ final class PullRequestStore: ObservableObject {
         let notificationCenter = NSWorkspace.shared.notificationCenter
         for observer in workspaceObservers {
             notificationCenter.removeObserver(observer)
+        }
+        for observer in systemTimeObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
         networkMonitor.cancel()
     }
@@ -222,6 +234,22 @@ final class PullRequestStore: ObservableObject {
         ]
     }
 
+    private func startSystemTimeMonitoring() {
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            NSNotification.Name.NSSystemTimeZoneDidChange,
+            NSNotification.Name.NSSystemClockDidChange,
+            NSNotification.Name.NSCalendarDayChanged,
+        ]
+        systemTimeObservers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.configurePolling()
+                }
+            }
+        }
+    }
+
     private func sessionActivityDidChange(isInactive: Bool) {
         guard isSessionInactive != isInactive else { return }
         isSessionInactive = isInactive
@@ -264,21 +292,33 @@ final class PullRequestStore: ObservableObject {
                 : "Network restored. Refresh polling resumed."
         ))
         Task {
-            await refreshOrganizations()
-            await refreshUserWhenAvailable(login: nil)
-            if let selectedUserLogin {
-                await refreshUserWhenAvailable(login: selectedUserLogin)
-            }
+            await performAutomaticRefresh(refreshOrganizationsFirst: true)
         }
     }
 
     func configurePolling() {
         timer?.invalidate()
         timer = nil
+        nextAutomaticRefreshDate = nil
+        let now = Date()
+        isPollingSleeping = pollingSleepIsActive(at: now)
         guard let minutes = activePollingIntervalMinutes else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: minutes * 60, repeats: true) { [weak self] _ in
+
+        var fireDate = now.addingTimeInterval(minutes * 60)
+        if let deferredUntil = quotaDeferredUntil, deferredUntil > fireDate {
+            fireDate = deferredUntil
+        } else if quotaDeferredUntil != nil, quotaDeferredUntil! <= now {
+            quotaDeferredUntil = nil
+        }
+        if let wakeDate = pollingSleepWakeDate(after: now) {
+            fireDate = max(fireDate, wakeDate)
+        }
+        nextAutomaticRefreshDate = fireDate
+        timer = Timer.scheduledTimer(withTimeInterval: max(fireDate.timeIntervalSince(now), 1), repeats: false) {
+            [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.refreshUser(login: nil)
+                await self?.performAutomaticRefresh()
+                self?.configurePolling()
             }
         }
     }
@@ -295,12 +335,161 @@ final class PullRequestStore: ObservableObject {
         return min(max(defaults.double(forKey: "pollIntervalMinutes"), 1), 60)
     }
 
+    private func pollingSleepIsActive(at date: Date) -> Bool {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.object(forKey: "pollingSleepEnabled") == nil
+            ? true
+            : defaults.bool(forKey: "pollingSleepEnabled")
+        let startMinutes = defaults.object(forKey: "pollingSleepStartMinutes") == nil
+            ? 19 * 60
+            : defaults.integer(forKey: "pollingSleepStartMinutes")
+        let endMinutes = defaults.object(forKey: "pollingSleepEndMinutes") == nil
+            ? 7 * 60
+            : defaults.integer(forKey: "pollingSleepEndMinutes")
+        return PollingSleepSchedule.isSleeping(
+            at: date,
+            enabled: enabled,
+            startMinutes: startMinutes,
+            endMinutes: endMinutes
+        )
+    }
+
+    private func pollingSleepWakeDate(after date: Date) -> Date? {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.object(forKey: "pollingSleepEnabled") == nil
+            ? true
+            : defaults.bool(forKey: "pollingSleepEnabled")
+        let startMinutes = defaults.object(forKey: "pollingSleepStartMinutes") == nil
+            ? 19 * 60
+            : defaults.integer(forKey: "pollingSleepStartMinutes")
+        let endMinutes = defaults.object(forKey: "pollingSleepEndMinutes") == nil
+            ? 7 * 60
+            : defaults.integer(forKey: "pollingSleepEndMinutes")
+        return PollingSleepSchedule.nextWakeDate(
+            after: date,
+            enabled: enabled,
+            startMinutes: startMinutes,
+            endMinutes: endMinutes
+        )
+    }
+
+    private func recordRateLimitStatus(_ status: GitHubRateLimitStatus) {
+        rateLimitStatus = status
+        rateLimitError = nil
+        if let deferredUntil = quotaDeferredUntil,
+           deferredUntil <= Date(),
+           status.remaining >= max(500, (lastRefreshGraphQLCost ?? 500) * 2),
+           status.searchRemaining >= 12 {
+            quotaDeferredUntil = nil
+        }
+    }
+
     func refresh() async {
         guard !isOffline else { return }
         await refreshUser(login: selectedUserLogin)
     }
 
-    private func refreshUser(login requestedUserLogin: String?) async {
+    func pollingPreferencesDidChange() {
+        quotaDeferredUntil = nil
+        configurePolling()
+    }
+
+    func checkRateLimit() async {
+        guard !isOffline, !isCheckingRateLimit, let client else {
+            if isOffline {
+                rateLimitError = "You’re offline. Quota will be available when the network returns."
+            }
+            return
+        }
+        isCheckingRateLimit = true
+        defer { isCheckingRateLimit = false }
+        do {
+            let status = try await client.fetchRateLimitStatus()
+            recordRateLimitStatus(status)
+            rateLimitError = nil
+        } catch {
+            rateLimitError = error.localizedDescription
+        }
+    }
+
+    private func performAutomaticRefresh(refreshOrganizationsFirst: Bool = false) async {
+        guard !isOffline else { return }
+        let now = Date()
+        if pollingSleepIsActive(at: now) {
+            isPollingSleeping = true
+            if let wakeDate = pollingSleepWakeDate(after: now) {
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .info,
+                    message: "Automatic refresh skipped during the polling sleep window; polling resumes \(wakeDate.formatted(date: .omitted, time: .shortened))."
+                ))
+            }
+            return
+        }
+        isPollingSleeping = false
+        guard let client else { return }
+
+        let quotaBefore: GitHubRateLimitStatus
+        do {
+            quotaBefore = try await client.fetchRateLimitStatus()
+            recordRateLimitStatus(quotaBefore)
+        } catch {
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .warning,
+                message: "Couldn’t check GitHub quota before automatic refresh: \(error.localizedDescription)"
+            ))
+            return
+        }
+
+        let graphQLReserve = max(500, (lastRefreshGraphQLCost ?? 500) * 2)
+        if quotaBefore.remaining < graphQLReserve {
+            quotaDeferredUntil = quotaBefore.resetAt.addingTimeInterval(5)
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .warning,
+                message: "Automatic refresh deferred: \(quotaBefore.remaining) GraphQL points remain; reserving \(graphQLReserve). Polling resumes after the quota resets."
+            ))
+            return
+        }
+
+        if let lastRefreshGraphQLCost,
+           lastRefreshGraphQLCost > 0,
+           let configuredMinutes = activePollingIntervalMinutes {
+            let usablePoints = max(quotaBefore.remaining - graphQLReserve, 0)
+            let affordableRefreshes = usablePoints / lastRefreshGraphQLCost
+            let secondsUntilReset = max(quotaBefore.resetAt.timeIntervalSince(now), 0)
+            if affordableRefreshes > 0 {
+                let quotaPacedInterval = secondsUntilReset / Double(affordableRefreshes)
+                let configuredInterval = configuredMinutes * 60
+                if quotaPacedInterval > configuredInterval * 1.25 {
+                    quotaDeferredUntil = now.addingTimeInterval(quotaPacedInterval)
+                    appendRefreshLog(PRRefreshLogEvent(
+                        level: .info,
+                        message: "Quota-aware pacing increased the next automatic refresh interval to \(Int(ceil(quotaPacedInterval / 60))) minutes."
+                    ))
+                }
+            }
+        }
+        let needsReviewSearch = enabledBuiltInSections.contains(.assigned)
+        let directOnly = UserDefaults.standard.string(forKey: "assignmentScope") == "directOnly"
+        let searchReserve = directOnly ? 12 : 2
+        if needsReviewSearch, quotaBefore.searchRemaining < searchReserve {
+            quotaDeferredUntil = quotaBefore.searchResetAt.addingTimeInterval(5)
+            appendRefreshLog(PRRefreshLogEvent(
+                level: .warning,
+                message: "Automatic refresh deferred: only \(quotaBefore.searchRemaining) REST search requests remain in the current minute; reserving \(searchReserve)."
+            ))
+            return
+        }
+
+        if refreshOrganizationsFirst {
+            await refreshOrganizations()
+        }
+        await refreshUser(login: nil, quotaBefore: quotaBefore)
+    }
+
+    private func refreshUser(
+        login requestedUserLogin: String?,
+        quotaBefore suppliedQuotaBefore: GitHubRateLimitStatus? = nil
+    ) async {
         guard !isOffline, let client else { return }
         let key = cacheKey(for: requestedUserLogin)
         let requestedGeneration = cacheGeneration
@@ -309,6 +498,15 @@ final class PullRequestStore: ObservableObject {
         defer {
             activeFetchKeys.remove(key)
             updateRefreshingState()
+        }
+        let quotaBefore: GitHubRateLimitStatus?
+        if let suppliedQuotaBefore {
+            quotaBefore = suppliedQuotaBefore
+        } else {
+            quotaBefore = try? await client.fetchRateLimitStatus()
+        }
+        if let quotaBefore {
+            recordRateLimitStatus(quotaBefore)
         }
 
         do {
@@ -430,13 +628,28 @@ final class PullRequestStore: ObservableObject {
                 errorMessage = combinedError.isEmpty ? nil : combinedError
             }
         } catch {
-            guard requestedGeneration == cacheGeneration, !isOffline else { return }
-            appendRefreshLog(PRRefreshLogEvent(
-                level: .error,
-                message: "Refresh stopped: \(error.localizedDescription)"
-            ))
-            if cacheKey(for: selectedUserLogin) == key {
-                errorMessage = error.localizedDescription
+            if requestedGeneration == cacheGeneration, !isOffline {
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .error,
+                    message: "Refresh stopped: \(error.localizedDescription)"
+                ))
+                if cacheKey(for: selectedUserLogin) == key {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+
+        if let quotaAfter = try? await client.fetchRateLimitStatus() {
+            recordRateLimitStatus(quotaAfter)
+            if let quotaBefore,
+               abs(quotaAfter.resetAt.timeIntervalSince(quotaBefore.resetAt)) < 1,
+               quotaAfter.used >= quotaBefore.used {
+                let cost = quotaAfter.used - quotaBefore.used
+                lastRefreshGraphQLCost = cost
+                appendRefreshLog(PRRefreshLogEvent(
+                    level: .info,
+                    message: "GitHub quota: this refresh used \(cost) GraphQL point\(cost == 1 ? "" : "s"); \(quotaAfter.remaining) of \(quotaAfter.limit) remain."
+                ))
             }
         }
     }

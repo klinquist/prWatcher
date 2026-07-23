@@ -1,5 +1,28 @@
 import Foundation
 
+private final class DirectReviewRequestCache: @unchecked Sendable {
+    struct Entry {
+        var pullRequestIDs: [String]
+        var lastScanAt: Date
+        var lastFullReconciliationAt: Date
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    func entry(for key: String) -> Entry? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[key]
+    }
+
+    func set(_ entry: Entry, for key: String) {
+        lock.lock()
+        entries[key] = entry
+        lock.unlock()
+    }
+}
+
 public enum GitHubClientError: LocalizedError {
     case ghNotFound
     case commandFailed(String)
@@ -19,6 +42,7 @@ public enum GitHubClientError: LocalizedError {
 
 public struct GitHubClient: Sendable {
     public let executableURL: URL
+    private let directReviewRequestCache: DirectReviewRequestCache
 
     public init(executableURL: URL? = nil) throws {
         if let executableURL {
@@ -28,6 +52,7 @@ public struct GitHubClient: Sendable {
         } else {
             throw GitHubClientError.ghNotFound
         }
+        directReviewRequestCache = DirectReviewRequestCache()
     }
 
     public static func findExecutable() -> URL? {
@@ -68,6 +93,7 @@ public struct GitHubClient: Sendable {
         onUpdate: (@Sendable (PRFetchUpdate) async -> Void)? = nil
     ) async throws -> PRSnapshot {
         let executableURL = self.executableURL
+        let directReviewRequestCache = self.directReviewRequestCache
         let organizationQualifier = Self.organizationQualifier(organization)
         let normalizedAuthor = authorLogin.flatMap(Self.normalizedGitHubLogin)
         if authorLogin != nil && normalizedAuthor == nil {
@@ -159,11 +185,13 @@ public struct GitHubClient: Sendable {
                     viewerLogin: viewer
                 ) {
                     do {
-                        let reviewResult = try Self.fetchSearchInSmallPages(
+                        let reviewResult = try Self.fetchReviewRequestedPullRequests(
                             executableURL: executableURL,
-                            query: "is:pr is:open \(reviewQualifier) -author:@me archived:false\(organizationQualifier) sort:updated-desc",
-                            maximumCount: 50,
-                            pageSize: 10,
+                            reviewQualifier: reviewQualifier,
+                            organizationQualifier: organizationQualifier,
+                            viewerLogin: viewer,
+                            includeTeamReviewRequests: includeTeamReviewRequests,
+                            cache: directReviewRequestCache,
                             logLabel: includeTeamReviewRequests
                                 ? "Assigned to me — review requests, including teams"
                                 : "Assigned to me — direct review requests",
@@ -184,8 +212,12 @@ public struct GitHubClient: Sendable {
                                 refreshedSections: refreshedSections.union([.assigned])
                             ))
                         }
-                    } catch where Self.isTransientGatewayError(error.localizedDescription) {
+                    } catch {
                         assignedQueriesSucceeded = false
+                        onLog?(PRRefreshLogEvent(
+                            level: .error,
+                            message: "\(includeTeamReviewRequests ? "Assigned to me — review requests, including teams" : "Assigned to me — direct review requests"): \(error.localizedDescription)"
+                        ))
                     }
                 } else {
                     assignedQueriesSucceeded = false
@@ -389,11 +421,26 @@ public struct GitHubClient: Sendable {
         includeTeamReviewRequests: Bool,
         viewerLogin: String
     ) -> String? {
-        if includeTeamReviewRequests {
-            return "review-requested:@me"
+        if let login = normalizedGitHubLogin(viewerLogin) {
+            return "review-requested:\(login)"
         }
-        guard let login = normalizedGitHubLogin(viewerLogin) else { return nil }
-        return "review-requested:\(login)"
+        return includeTeamReviewRequests ? "review-requested:@me" : nil
+    }
+
+    static func reviewRequestRecencyQualifier(
+        now: Date = Date(),
+        lookbackDays: Int = 14
+    ) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let cutoff = calendar.date(byAdding: .day, value: -lookbackDays, to: now) ?? now
+        let components = calendar.dateComponents([.year, .month, .day], from: cutoff)
+        return String(
+            format: "updated:>=%04d-%02d-%02d",
+            components.year ?? 1970,
+            components.month ?? 1,
+            components.day ?? 1
+        )
     }
 
     public func fetchUserProfile(login: String) async throws -> GitHubUserProfile {
@@ -484,6 +531,17 @@ public struct GitHubClient: Sendable {
         }.value
     }
 
+    public func fetchRateLimitStatus() async throws -> GitHubRateLimitStatus {
+        let executableURL = self.executableURL
+        return try await Task.detached(priority: .utility) {
+            let data = try Self.runWithGatewayRetry(
+                executableURL: executableURL,
+                arguments: ["api", "--method", "GET", "rate_limit"]
+            )
+            return try Self.decodeRateLimitStatus(data)
+        }.value
+    }
+
     public func close(_ pullRequest: PullRequest) async throws {
         try await runAction(["pr", "close", pullRequest.url.absoluteString])
     }
@@ -545,6 +603,66 @@ public struct GitHubClient: Sendable {
       }
       commits(last: 1) {
         nodes { commit { statusCheckRollup { state } } }
+      }
+    }
+    """#
+
+    static let pullRequestNodesGraphQLQuery = #"""
+    query PRWatcherNodes($ids: [ID!]!) {
+      viewer { login }
+      nodes(ids: $ids) {
+        ... on PullRequest {
+          id
+          number
+          title
+          url
+          isDraft
+          createdAt
+          mergedAt
+          updatedAt
+          reviewDecision
+          mergeable
+          mergeStateStatus
+          state
+          viewerCanClose
+          viewerCanUpdate
+          viewerCanEnableAutoMerge
+          author { login }
+          repository { nameWithOwner viewerPermission }
+          assignees(first: 20) { nodes { login } }
+          reviewRequests(first: 20) {
+            nodes {
+              requestedReviewer {
+                ... on User { login }
+                ... on Team { name slug organization { login } }
+              }
+            }
+          }
+          commits(last: 1) {
+            nodes { commit { statusCheckRollup { state } } }
+          }
+        }
+      }
+    }
+    """#
+
+    static let directReviewCandidatesGraphQLQuery = #"""
+    query PRWatcherDirectReviewCandidates($ids: [ID!]!) {
+      viewer { login }
+      nodes(ids: $ids) {
+        ... on PullRequest {
+          id
+          state
+          author { login }
+          reviewRequests(first: 20) {
+            nodes {
+              requestedReviewer {
+                ... on User { login }
+                ... on Team { name slug organization { login } }
+              }
+            }
+          }
+        }
       }
     }
     """#
@@ -677,43 +795,301 @@ public struct GitHubClient: Sendable {
         }
     }
 
-    private static func fetchSearchInSmallPages(
+    private static func fetchReviewRequestedPullRequests(
+        executableURL: URL,
+        reviewQualifier: String,
+        organizationQualifier: String,
+        viewerLogin: String,
+        includeTeamReviewRequests: Bool,
+        cache: DirectReviewRequestCache,
+        logLabel: String,
+        onLog: (@Sendable (PRRefreshLogEvent) -> Void)?
+    ) throws -> (viewer: String, nodes: [PRNode], hasNextPage: Bool, endCursor: String?) {
+        let baseQuery = "is:pr is:open \(reviewQualifier) -author:@me archived:false\(organizationQualifier)"
+
+        if includeTeamReviewRequests {
+            onLog?(PRRefreshLogEvent(
+                level: .info,
+                message: "Refreshing \(logLabel) with lightweight REST candidate discovery…"
+            ))
+            let result = try fetchPullRequestSearchCandidateIDs(
+                executableURL: executableURL,
+                query: "\(baseQuery) \(reviewRequestRecencyQualifier()) sort:updated-desc",
+                maximumCount: 50,
+                pageSize: 50,
+                logLabel: logLabel,
+                onLog: onLog
+            )
+            let hydrated = try fetchPullRequestNodes(
+                executableURL: executableURL,
+                ids: result.ids,
+                logLabel: logLabel,
+                onLog: onLog
+            )
+            onLog?(PRRefreshLogEvent(
+                level: .success,
+                message: "\(logLabel): \(result.totalCount) recent candidate\(result.totalCount == 1 ? "" : "s"); hydrated \(hydrated.nodes.count)."
+            ))
+            return (
+                hydrated.viewer.isEmpty ? viewerLogin : hydrated.viewer,
+                hydrated.nodes,
+                result.totalCount > result.ids.count,
+                nil
+            )
+        }
+
+        let now = Date()
+        let cacheKey = "\(viewerLogin.lowercased())|\(organizationQualifier.lowercased())"
+        let cached = cache.entry(for: cacheKey)
+        let needsFullReconciliation = cached.map {
+            now.timeIntervalSince($0.lastFullReconciliationAt) >= 60 * 60
+        } ?? true
+
+        var retainedDirectIDs: [String] = []
+        if let cached, !cached.pullRequestIDs.isEmpty {
+            let existingCandidates = try fetchDirectReviewCandidateNodes(
+                executableURL: executableURL,
+                ids: cached.pullRequestIDs,
+                logLabel: "\(logLabel) — cached direct requests",
+                onLog: onLog
+            )
+            retainedDirectIDs = directReviewRequestIDs(
+                from: existingCandidates.nodes,
+                viewerLogin: viewerLogin
+            )
+        }
+
+        let scanQualifier: String
+        if needsFullReconciliation {
+            scanQualifier = reviewRequestRecencyQualifier(now: now)
+        } else {
+            let overlapDate = (cached?.lastScanAt ?? now).addingTimeInterval(-5 * 60)
+            scanQualifier = "updated:>=\(ISO8601DateFormatter().string(from: overlapDate))"
+        }
+
+        let scanKind = needsFullReconciliation ? "full reconciliation" : "incremental scan"
+        onLog?(PRRefreshLogEvent(
+            level: .info,
+            message: "Refreshing \(logLabel) with a \(scanKind)…"
+        ))
+
+        let searchResult: (ids: [String], totalCount: Int, incomplete: Bool)
+        do {
+            searchResult = try fetchPullRequestSearchCandidateIDs(
+                executableURL: executableURL,
+                query: "\(baseQuery) \(scanQualifier) sort:updated-desc",
+                maximumCount: needsFullReconciliation ? 1_000 : 200,
+                pageSize: 100,
+                logLabel: logLabel,
+                onLog: onLog
+            )
+        } catch {
+            guard cached != nil else { throw error }
+            onLog?(PRRefreshLogEvent(
+                level: .warning,
+                message: "\(logLabel): candidate discovery failed; using \(retainedDirectIDs.count) validated cached direct request\(retainedDirectIDs.count == 1 ? "" : "s")."
+            ))
+            let hydrated = try fetchPullRequestNodes(
+                executableURL: executableURL,
+                ids: Array(retainedDirectIDs.prefix(50)),
+                logLabel: logLabel,
+                onLog: onLog
+            )
+            return (hydrated.viewer.isEmpty ? viewerLogin : hydrated.viewer, hydrated.nodes, false, nil)
+        }
+
+        let scannedCandidates = try fetchDirectReviewCandidateNodes(
+            executableURL: executableURL,
+            ids: searchResult.ids,
+            logLabel: "\(logLabel) — candidate classification",
+            onLog: onLog
+        )
+        let scannedDirectIDs = directReviewRequestIDs(
+            from: scannedCandidates.nodes,
+            viewerLogin: viewerLogin
+        )
+
+        var combinedIDs = needsFullReconciliation ? scannedDirectIDs : scannedDirectIDs + retainedDirectIDs
+        var seen = Set<String>()
+        combinedIDs = combinedIDs.filter { seen.insert($0).inserted }
+        let scanWasCapped = searchResult.incomplete || searchResult.totalCount > searchResult.ids.count
+        let forceFullReconciliationNextTime = !needsFullReconciliation && scanWasCapped
+
+        cache.set(
+            DirectReviewRequestCache.Entry(
+                pullRequestIDs: combinedIDs,
+                lastScanAt: now,
+                lastFullReconciliationAt: forceFullReconciliationNextTime
+                    ? .distantPast
+                    : needsFullReconciliation
+                    ? now
+                    : (cached?.lastFullReconciliationAt ?? now)
+            ),
+            for: cacheKey
+        )
+
+        let classifiedCount = scannedCandidates.nodes.count
+        let nonDirectCount = max(classifiedCount - scannedDirectIDs.count, 0)
+        let incompleteSuffix: String
+        if forceFullReconciliationNextTime {
+            incompleteSuffix = " Candidate results were capped; a full reconciliation will run at the next refresh."
+        } else if scanWasCapped {
+            incompleteSuffix = " Candidate results were capped; another full reconciliation will run in one hour."
+        } else {
+            incompleteSuffix = ""
+        }
+        let candidateSuffix = searchResult.totalCount == 1 ? "" : "s"
+        onLog?(PRRefreshLogEvent(
+            level: .success,
+            message: "\(logLabel): \(searchResult.totalCount) candidate\(candidateSuffix), \(scannedDirectIDs.count) direct, \(nonDirectCount) team-only in this \(scanKind).\(incompleteSuffix)"
+        ))
+
+        let hydrated = try fetchPullRequestNodes(
+            executableURL: executableURL,
+            ids: Array(combinedIDs.prefix(50)),
+            logLabel: logLabel,
+            onLog: onLog
+        )
+        return (
+            hydrated.viewer.isEmpty ? viewerLogin : hydrated.viewer,
+            hydrated.nodes,
+            combinedIDs.count > 50,
+            nil
+        )
+    }
+
+    private static func fetchPullRequestSearchCandidateIDs(
         executableURL: URL,
         query: String,
         maximumCount: Int,
         pageSize: Int,
         logLabel: String,
-        onLog: (@Sendable (PRRefreshLogEvent) -> Void)? = nil
-    ) throws -> (viewer: String, nodes: [PRNode], hasNextPage: Bool, endCursor: String?) {
+        onLog: (@Sendable (PRRefreshLogEvent) -> Void)?
+    ) throws -> (ids: [String], totalCount: Int, incomplete: Bool) {
+        var ids: [String] = []
+        var seen = Set<String>()
+        var page = 1
+        var totalCount = 0
+        var incomplete = false
+        let boundedPageSize = min(max(pageSize, 1), 100)
+
+        while ids.count < maximumCount {
+            let currentPage = page
+            let arguments = [
+                "api", "--method", "GET", "search/issues",
+                "-f", "q=\(query)",
+                "-F", "per_page=\(boundedPageSize)",
+                "-F", "page=\(currentPage)"
+            ]
+            let data = try runWithGatewayRetry(
+                executableURL: executableURL,
+                arguments: arguments,
+                onRetry: { attempt, maximumAttempts in
+                    onLog?(PRRefreshLogEvent(
+                        level: .warning,
+                        message: "\(logLabel) — candidates page \(currentPage): gateway error on attempt \(attempt) of \(maximumAttempts); retrying."
+                    ))
+                }
+            )
+            let response = try decodePullRequestSearchCandidates(data)
+            totalCount = response.totalCount
+            incomplete = incomplete || response.incompleteResults
+            for item in response.items where ids.count < maximumCount {
+                if seen.insert(item.nodeID).inserted {
+                    ids.append(item.nodeID)
+                }
+            }
+            onLog?(PRRefreshLogEvent(
+                level: .info,
+                message: "\(logLabel) — candidates page \(currentPage): received \(response.items.count)."
+            ))
+            guard !response.items.isEmpty,
+                  response.items.count == boundedPageSize,
+                  ids.count < min(totalCount, maximumCount) else { break }
+            page += 1
+        }
+        return (ids, totalCount, incomplete)
+    }
+
+    private static func fetchDirectReviewCandidateNodes(
+        executableURL: URL,
+        ids: [String],
+        logLabel: String,
+        onLog: (@Sendable (PRRefreshLogEvent) -> Void)?
+    ) throws -> (viewer: String, nodes: [DirectReviewCandidateNode]) {
+        guard !ids.isEmpty else { return ("", []) }
+        var viewer = ""
+        var nodes: [DirectReviewCandidateNode] = []
+        for (index, batch) in ids.chunked(into: 50).enumerated() {
+            let data = try runWithGatewayRetry(
+                executableURL: executableURL,
+                arguments: nodeGraphQLArguments(
+                    query: directReviewCandidatesGraphQLQuery,
+                    ids: batch
+                ),
+                onRetry: { attempt, maximumAttempts in
+                    onLog?(PRRefreshLogEvent(
+                        level: .warning,
+                        message: "\(logLabel) — batch \(index + 1): gateway error on attempt \(attempt) of \(maximumAttempts); retrying."
+                    ))
+                }
+            )
+            let result = try decodeDirectReviewCandidates(data)
+            if !result.viewer.isEmpty { viewer = result.viewer }
+            nodes.append(contentsOf: result.nodes)
+        }
+        return (viewer, nodes)
+    }
+
+    private static func fetchPullRequestNodes(
+        executableURL: URL,
+        ids: [String],
+        logLabel: String,
+        onLog: (@Sendable (PRRefreshLogEvent) -> Void)?
+    ) throws -> (viewer: String, nodes: [PRNode]) {
+        guard !ids.isEmpty else { return ("", []) }
         var viewer = ""
         var nodes: [PRNode] = []
-        var seen = Set<String>()
-        var cursor: String?
-        var hasNextPage = true
-        var pageNumber = 1
-
-        while hasNextPage && nodes.count < maximumCount {
-            let requestedCount = min(pageSize, maximumCount - nodes.count)
-            let page = try fetchSearch(
+        for (index, batch) in ids.chunked(into: 50).enumerated() {
+            let data = try runWithGatewayRetry(
                 executableURL: executableURL,
-                query: query,
-                count: requestedCount,
-                after: cursor,
-                logLabel: "\(logLabel) — page \(pageNumber)",
-                onLog: onLog
+                arguments: nodeGraphQLArguments(query: pullRequestNodesGraphQLQuery, ids: batch),
+                onRetry: { attempt, maximumAttempts in
+                    onLog?(PRRefreshLogEvent(
+                        level: .warning,
+                        message: "\(logLabel) — hydration batch \(index + 1): gateway error on attempt \(attempt) of \(maximumAttempts); retrying."
+                    ))
+                }
             )
-            viewer = page.viewer
-            nodes.append(contentsOf: page.nodes.filter { seen.insert($0.id).inserted })
-            hasNextPage = page.hasNextPage
-            guard hasNextPage, let nextCursor = page.endCursor, nextCursor != cursor else {
-                hasNextPage = false
-                break
-            }
-            cursor = nextCursor
-            pageNumber += 1
+            let result = try decodePullRequestNodes(data)
+            if !result.viewer.isEmpty { viewer = result.viewer }
+            nodes.append(contentsOf: result.nodes)
         }
+        return (viewer, nodes)
+    }
 
-        return (viewer, nodes, hasNextPage, cursor)
+    static func nodeGraphQLArguments(query: String, ids: [String]) -> [String] {
+        var arguments = ["api", "graphql", "-f", "query=\(query)"]
+        for id in ids {
+            arguments += ["-F", "ids[]=\(id)"]
+        }
+        return arguments
+    }
+
+    static func directReviewRequestIDs(
+        from nodes: [DirectReviewCandidateNode],
+        viewerLogin: String
+    ) -> [String] {
+        nodes.compactMap { node in
+            guard node.state == "OPEN",
+                  node.author?.login.caseInsensitiveCompare(viewerLogin) != .orderedSame else {
+                return nil
+            }
+            let isDirect = node.reviewRequests.nodes
+                .compactMap { $0?.requestedReviewer?.login }
+                .contains { $0.caseInsensitiveCompare(viewerLogin) == .orderedSame }
+            return isDirect ? node.id : nil
+        }
     }
 
     private static func fetchWatchedNode(
@@ -888,6 +1264,76 @@ public struct GitHubClient: Sendable {
             result.results.nodes.compactMap { $0 },
             result.results.pageInfo?.hasNextPage ?? false,
             result.results.pageInfo?.endCursor
+        )
+    }
+
+    static func decodePullRequestNodes(
+        _ data: Data
+    ) throws -> (viewer: String, nodes: [PRNode]) {
+        let response: NodesGraphQLResponse
+        do {
+            response = try JSONDecoder().decode(NodesGraphQLResponse.self, from: data)
+        } catch {
+            throw GitHubClientError.invalidResponse(error.localizedDescription)
+        }
+        if let message = response.errors?.map(\.message).joined(separator: "\n"), !message.isEmpty {
+            throw GitHubClientError.commandFailed(message)
+        }
+        guard let result = response.data else {
+            throw GitHubClientError.invalidResponse("missing pull request node data")
+        }
+        return (result.viewer.login, result.nodes.compactMap { $0 })
+    }
+
+    static func decodeDirectReviewCandidates(
+        _ data: Data
+    ) throws -> (viewer: String, nodes: [DirectReviewCandidateNode]) {
+        let response: DirectReviewCandidatesGraphQLResponse
+        do {
+            response = try JSONDecoder().decode(
+                DirectReviewCandidatesGraphQLResponse.self,
+                from: data
+            )
+        } catch {
+            throw GitHubClientError.invalidResponse(error.localizedDescription)
+        }
+        if let message = response.errors?.map(\.message).joined(separator: "\n"), !message.isEmpty {
+            throw GitHubClientError.commandFailed(message)
+        }
+        guard let result = response.data else {
+            throw GitHubClientError.invalidResponse("missing direct review candidate data")
+        }
+        return (result.viewer.login, result.nodes.compactMap { $0 })
+    }
+
+    static func decodePullRequestSearchCandidates(
+        _ data: Data
+    ) throws -> PullRequestSearchRESTResponse {
+        do {
+            return try JSONDecoder().decode(PullRequestSearchRESTResponse.self, from: data)
+        } catch {
+            throw GitHubClientError.invalidResponse(error.localizedDescription)
+        }
+    }
+
+    static func decodeRateLimitStatus(_ data: Data) throws -> GitHubRateLimitStatus {
+        let response: RateLimitRESTResponse
+        do {
+            response = try JSONDecoder().decode(RateLimitRESTResponse.self, from: data)
+        } catch {
+            throw GitHubClientError.invalidResponse(error.localizedDescription)
+        }
+        let graphql = response.resources.graphql
+        let search = response.resources.search
+        return GitHubRateLimitStatus(
+            limit: graphql.limit,
+            used: graphql.used,
+            remaining: graphql.remaining,
+            resetAt: Date(timeIntervalSince1970: graphql.reset),
+            searchLimit: search.limit,
+            searchUsed: search.used,
+            searchRemaining: search.remaining,
+            searchResetAt: Date(timeIntervalSince1970: search.reset)
         )
     }
 
@@ -1101,4 +1547,13 @@ private extension ISO8601DateFormatter {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+}
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [self] }
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
+        }
+    }
 }

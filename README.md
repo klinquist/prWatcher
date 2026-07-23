@@ -6,7 +6,7 @@
 
 prWatcher is a compact native macOS dashboard for the GitHub pull requests that need your attention. It lives comfortably in a corner of the display, talks to GitHub through your existing `gh` CLI login, and keeps useful results visible even when GitHub—or your network—is unavailable.
 
-Current version: **0.5.0**
+Current version: **0.6.0**
 
 Created by **Kristopher Linquist**.
 
@@ -70,8 +70,13 @@ A permission-aware **Merge** button appears on PRs that are ready. **Merge When 
 ## Refreshing, caching, and offline behavior
 
 - Separate refresh intervals are configurable for unlocked and locked/inactive macOS sessions. They default to three and fifteen minutes respectively, and locked polling can be paused entirely.
-- GitHub calls use `gh api graphql`, so prWatcher uses your existing GitHub CLI authentication.
+- Automatic polling has a configurable local-time sleep window, enabled by default from **7:00 PM to 7:00 AM**. Manual Refresh remains available while polling is asleep, and automatic polling resumes at the end of the window.
+- GitHub calls use `gh api`, so prWatcher uses your existing GitHub CLI authentication.
+- Settings can check both the GraphQL point allowance and the separate REST search allowance, show their reset times, and report the GraphQL cost measured for the most recent refresh.
+- Before each automatic refresh, prWatcher checks both relevant quota buckets. It uses the measured cost of the previous refresh to increase the polling interval when necessary, and defers polling until the applicable reset when there is not enough safe headroom for another refresh.
 - Built-in categories use separate, bounded API calls to avoid oversized shared requests.
+- Review requests are limited to PRs updated during the past 14 days. Candidate discovery uses GitHub’s lightweight REST search, then hydrates matching PRs in GraphQL batches instead of making one rich query per candidate.
+- Direct-only review requests are classified by their actual requested reviewer. prWatcher performs incremental scans during normal polling, revalidates cached direct requests each time, and performs a full reconciliation once per hour so GitHub team requests do not leak into the direct-only view.
 - Actionable, Assigned, Watched, and Custom results are fetched before the lower-priority Drafts and Merged sections.
 - Results appear progressively as calls complete, while existing rows stay visible to prevent layout jumps.
 - Previous results remain on screen when an individual category fails.

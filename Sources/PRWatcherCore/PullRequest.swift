@@ -409,3 +409,93 @@ public struct PRFetchUpdate: Sendable {
         self.refreshedCustomSectionIDs = refreshedCustomSectionIDs
     }
 }
+
+public struct GitHubRateLimitStatus: Sendable, Equatable {
+    public let limit: Int
+    public let used: Int
+    public let remaining: Int
+    public let resetAt: Date
+    public let searchLimit: Int
+    public let searchUsed: Int
+    public let searchRemaining: Int
+    public let searchResetAt: Date
+    public let checkedAt: Date
+
+    public init(
+        limit: Int,
+        used: Int,
+        remaining: Int,
+        resetAt: Date,
+        searchLimit: Int,
+        searchUsed: Int,
+        searchRemaining: Int,
+        searchResetAt: Date,
+        checkedAt: Date = Date()
+    ) {
+        self.limit = limit
+        self.used = used
+        self.remaining = remaining
+        self.resetAt = resetAt
+        self.searchLimit = searchLimit
+        self.searchUsed = searchUsed
+        self.searchRemaining = searchRemaining
+        self.searchResetAt = searchResetAt
+        self.checkedAt = checkedAt
+    }
+}
+
+public enum PollingSleepSchedule {
+    public static func isSleeping(
+        at date: Date,
+        enabled: Bool,
+        startMinutes: Int,
+        endMinutes: Int,
+        calendar inputCalendar: Calendar = .current
+    ) -> Bool {
+        guard enabled else { return false }
+        let start = normalizedMinutes(startMinutes)
+        let end = normalizedMinutes(endMinutes)
+        guard start != end else { return false }
+
+        var calendar = inputCalendar
+        calendar.timeZone = inputCalendar.timeZone
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let current = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        if start < end {
+            return current >= start && current < end
+        }
+        return current >= start || current < end
+    }
+
+    public static func nextWakeDate(
+        after date: Date,
+        enabled: Bool,
+        startMinutes: Int,
+        endMinutes: Int,
+        calendar inputCalendar: Calendar = .current
+    ) -> Date? {
+        guard isSleeping(
+            at: date,
+            enabled: enabled,
+            startMinutes: startMinutes,
+            endMinutes: endMinutes,
+            calendar: inputCalendar
+        ) else { return nil }
+
+        var calendar = inputCalendar
+        calendar.timeZone = inputCalendar.timeZone
+        let end = normalizedMinutes(endMinutes)
+        let startOfToday = calendar.startOfDay(for: date)
+        for dayOffset in 0...2 {
+            guard let day = calendar.date(byAdding: .day, value: dayOffset, to: startOfToday),
+                  let candidate = calendar.date(byAdding: .minute, value: end, to: day),
+                  candidate > date else { continue }
+            return candidate
+        }
+        return nil
+    }
+
+    private static func normalizedMinutes(_ minutes: Int) -> Int {
+        min(max(minutes, 0), 1_439)
+    }
+}

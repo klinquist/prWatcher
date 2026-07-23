@@ -165,7 +165,165 @@ func directReviewRequestQualifier() {
     #expect(GitHubClient.reviewRequestQualifier(
         includeTeamReviewRequests: true,
         viewerLogin: "Octo-Cat"
+    ) == "review-requested:Octo-Cat")
+    #expect(GitHubClient.reviewRequestQualifier(
+        includeTeamReviewRequests: true,
+        viewerLogin: ""
     ) == "review-requested:@me")
+}
+
+@Test("Review-request searches are limited to PRs updated in the past 14 days")
+func reviewRequestRecencyQualifier() throws {
+    let now = try #require(ISO8601DateFormatter().date(from: "2026-07-23T12:00:00Z"))
+    #expect(
+        GitHubClient.reviewRequestRecencyQualifier(now: now)
+            == "updated:>=2026-07-09"
+    )
+}
+
+@Test("Polling sleep handles an overnight local-time window")
+func pollingSleepSchedule() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+    let evening = try #require(ISO8601DateFormatter().date(from: "2026-07-23T20:30:00Z"))
+    let morning = try #require(ISO8601DateFormatter().date(from: "2026-07-24T06:30:00Z"))
+    let daytime = try #require(ISO8601DateFormatter().date(from: "2026-07-24T12:00:00Z"))
+
+    #expect(PollingSleepSchedule.isSleeping(
+        at: evening,
+        enabled: true,
+        startMinutes: 19 * 60,
+        endMinutes: 7 * 60,
+        calendar: calendar
+    ))
+    #expect(PollingSleepSchedule.isSleeping(
+        at: morning,
+        enabled: true,
+        startMinutes: 19 * 60,
+        endMinutes: 7 * 60,
+        calendar: calendar
+    ))
+    #expect(!PollingSleepSchedule.isSleeping(
+        at: daytime,
+        enabled: true,
+        startMinutes: 19 * 60,
+        endMinutes: 7 * 60,
+        calendar: calendar
+    ))
+    #expect(!PollingSleepSchedule.isSleeping(
+        at: evening,
+        enabled: false,
+        startMinutes: 19 * 60,
+        endMinutes: 7 * 60,
+        calendar: calendar
+    ))
+
+    let wake = try #require(PollingSleepSchedule.nextWakeDate(
+        after: evening,
+        enabled: true,
+        startMinutes: 19 * 60,
+        endMinutes: 7 * 60,
+        calendar: calendar
+    ))
+    #expect(wake == ISO8601DateFormatter().date(from: "2026-07-24T07:00:00Z"))
+}
+
+@Test("GitHub quota status includes GraphQL and REST search buckets")
+func decodeRateLimitStatus() throws {
+    let json = #"""
+    {
+      "resources": {
+        "graphql": { "limit": 5000, "used": 771, "remaining": 4229, "reset": 1784813747 },
+        "search": { "limit": 30, "used": 4, "remaining": 26, "reset": 1784810200 }
+      }
+    }
+    """#
+    let status = try GitHubClient.decodeRateLimitStatus(Data(json.utf8))
+    #expect(status.limit == 5000)
+    #expect(status.used == 771)
+    #expect(status.remaining == 4229)
+    #expect(status.searchLimit == 30)
+    #expect(status.searchRemaining == 26)
+    #expect(status.resetAt == Date(timeIntervalSince1970: 1_784_813_747))
+}
+
+@Test("REST review candidates decode and GraphQL node IDs are sent as an array")
+func reviewCandidateArguments() throws {
+    let json = #"""
+    {
+      "total_count": 2,
+      "incomplete_results": false,
+      "items": [
+        { "node_id": "PR_one" },
+        { "node_id": "PR_two" }
+      ]
+    }
+    """#
+    let result = try GitHubClient.decodePullRequestSearchCandidates(Data(json.utf8))
+    #expect(result.totalCount == 2)
+    #expect(result.items.map(\.nodeID) == ["PR_one", "PR_two"])
+
+    let arguments = GitHubClient.nodeGraphQLArguments(
+        query: "query Test($ids: [ID!]!) { nodes(ids: $ids) { id } }",
+        ids: ["PR_one", "PR_two"]
+    )
+    #expect(arguments.contains("ids[]=PR_one"))
+    #expect(arguments.contains("ids[]=PR_two"))
+}
+
+@Test("Direct-review classification excludes team, self-authored, and closed PRs")
+func directReviewCandidateClassification() throws {
+    let json = #"""
+    {
+      "data": {
+        "viewer": { "login": "octocat" },
+        "nodes": [
+          {
+            "id": "PR_direct",
+            "state": "OPEN",
+            "author": { "login": "hubot" },
+            "reviewRequests": { "nodes": [
+              { "requestedReviewer": { "login": "octocat" } }
+            ] }
+          },
+          {
+            "id": "PR_team",
+            "state": "OPEN",
+            "author": { "login": "hubot" },
+            "reviewRequests": { "nodes": [
+              { "requestedReviewer": {
+                "name": "Platform",
+                "slug": "platform",
+                "organization": { "login": "acme" }
+              } }
+            ] }
+          },
+          {
+            "id": "PR_self",
+            "state": "OPEN",
+            "author": { "login": "octocat" },
+            "reviewRequests": { "nodes": [
+              { "requestedReviewer": { "login": "octocat" } }
+            ] }
+          },
+          {
+            "id": "PR_closed",
+            "state": "CLOSED",
+            "author": { "login": "hubot" },
+            "reviewRequests": { "nodes": [
+              { "requestedReviewer": { "login": "octocat" } }
+            ] }
+          }
+        ]
+      }
+    }
+    """#
+    let decoded = try GitHubClient.decodeDirectReviewCandidates(Data(json.utf8))
+    #expect(decoded.viewer == "octocat")
+    #expect(
+        GitHubClient.directReviewRequestIDs(from: decoded.nodes, viewerLogin: "OctoCat")
+            == ["PR_direct"]
+    )
 }
 
 @Test("Custom searches imply pull requests without rewriting the query")
