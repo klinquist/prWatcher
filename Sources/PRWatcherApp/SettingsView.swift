@@ -2,6 +2,7 @@ import AppKit
 #if canImport(PRWatcherCore)
 import PRWatcherCore
 #endif
+import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
@@ -17,6 +18,9 @@ struct SettingsView: View {
     @State private var isAddingTeamMember = false
     @State private var editingCustomSection: CustomPRSection?
     @State private var isEditingSections = false
+    @State private var launchAtLoginEnabled = false
+    @State private var launchAtLoginRequiresApproval = false
+    @State private var launchAtLoginError: String?
 
     var body: some View {
         Form {
@@ -210,10 +214,34 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Startup") {
+                Toggle("Launch prWatcher at login", isOn: Binding(
+                    get: { launchAtLoginEnabled },
+                    set: { setLaunchAtLogin(enabled: $0) }
+                ))
+
+                if launchAtLoginRequiresApproval {
+                    HStack {
+                        Text("macOS requires approval for this login item.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("Open Login Items") {
+                            SMAppService.openSystemSettingsLoginItems()
+                        }
+                    }
+                } else if let launchAtLoginError {
+                    Text(launchAtLoginError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 590)
+        .frame(width: 480, height: 640)
         .task {
+            refreshLaunchAtLoginStatus()
             if store.availableOrganizations.isEmpty {
                 await store.refreshOrganizations()
             }
@@ -232,6 +260,11 @@ struct SettingsView: View {
         }
         .onChange(of: hideDockIcon) { _, isHidden in
             DockIconVisibility.apply(isHidden: isHidden)
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification
+        )) { _ in
+            refreshLaunchAtLoginStatus()
         }
         .sheet(item: $editingCustomSection) { section in
             CustomSectionEditor(
@@ -271,6 +304,30 @@ struct SettingsView: View {
             }
             isAddingTeamMember = false
         }
+    }
+
+    private func setLaunchAtLogin(enabled: Bool) {
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled
+                    && SMAppService.mainApp.status != .requiresApproval {
+                    try SMAppService.mainApp.register()
+                }
+            } else if SMAppService.mainApp.status == .enabled
+                || SMAppService.mainApp.status == .requiresApproval {
+                try SMAppService.mainApp.unregister()
+            }
+            launchAtLoginError = nil
+        } catch {
+            launchAtLoginError = "Couldn’t update the login item: \(error.localizedDescription)"
+        }
+        refreshLaunchAtLoginStatus()
+    }
+
+    private func refreshLaunchAtLoginStatus() {
+        let status = SMAppService.mainApp.status
+        launchAtLoginEnabled = status == .enabled || status == .requiresApproval
+        launchAtLoginRequiresApproval = status == .requiresApproval
     }
 }
 

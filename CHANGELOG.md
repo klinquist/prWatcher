@@ -4,6 +4,16 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-23
+
+### Added
+
+- Add a native Launch at Login setting with macOS approval-state handling and a shortcut to Login Items settings.
+
+### Changed
+
+- Refresh actionable, watched, assigned, and custom sections before the lower-priority Drafts and Merged sections.
+
 ### Security
 
 - Keep App Store Connect key identifiers and paths out of normal Xcode build invocations unless explicitly enabled.

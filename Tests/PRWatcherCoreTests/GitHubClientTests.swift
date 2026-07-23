@@ -143,6 +143,15 @@ func authoredSectionSearchQualifiers() {
     #expect(GitHubClient.authoredSearchQualifier(for: .waitingForReview) == "draft:false")
 }
 
+@Test("Actionable authored sections refresh before drafts and merged")
+func refreshPriority() {
+    #expect(GitHubClient.priorityAuthoredSectionOrder == [
+        .failingCI, .readyToMerge, .waitingForCI, .waitingForReview,
+    ])
+    #expect(!GitHubClient.priorityAuthoredSectionOrder.contains(.drafts))
+    #expect(!GitHubClient.priorityAuthoredSectionOrder.contains(.merged))
+}
+
 @Test("Direct review requests use the explicit viewer login")
 func directReviewRequestQualifier() {
     #expect(GitHubClient.reviewRequestQualifier(

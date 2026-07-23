@@ -91,9 +91,7 @@ public struct GitHubClient: Sendable {
             var refreshedCustomSectionIDs = Set<UUID>()
             var failedRefreshLabels: [String] = []
 
-            let authoredSectionOrder: [PRSection] = [
-                .failingCI, .readyToMerge, .waitingForCI, .waitingForReview, .drafts
-            ]
+            let authoredSectionOrder = Self.priorityAuthoredSectionOrder
             for section in authoredSectionOrder where includedSections.contains(section) {
                 let qualifier = Self.authoredSearchQualifier(for: section)
                 let result: (viewer: String, nodes: [PRNode], hasNextPage: Bool, endCursor: String?)
@@ -127,52 +125,7 @@ public struct GitHubClient: Sendable {
                 }
             }
 
-            if includedSections.contains(.merged) {
-                do {
-                    let result = try Self.fetchSearch(
-                        executableURL: executableURL,
-                        query: "is:pr is:merged \(authorQualifier) archived:false\(organizationQualifier) sort:updated-desc",
-                        count: 25,
-                        logLabel: PRSection.merged.title,
-                        onLog: onLog
-                    )
-                    viewer = result.viewer
-                    merged = result.nodes
-                    refreshedSections.insert(.merged)
-                    if let onUpdate {
-                        await onUpdate(PRFetchUpdate(
-                            snapshot: Self.makeSnapshot(
-                                viewer: viewer,
-                                authored: authored,
-                                assigned: assigned,
-                                reviewRequested: reviewRequested,
-                                merged: merged,
-                                includedSections: includedSections
-                            ),
-                            refreshedSections: refreshedSections
-                        ))
-                    }
-                } catch where Self.isTransientGatewayError(error.localizedDescription) {
-                    failedRefreshLabels.append(PRSection.merged.title)
-                }
-            }
-
-            if normalizedAuthor != nil {
-                let snapshot = Self.makeSnapshot(
-                    viewer: viewer,
-                    authored: authored,
-                    assigned: assigned,
-                    reviewRequested: reviewRequested,
-                    merged: merged,
-                    includedSections: includedSections,
-                    refreshedSectionsMetadata: refreshedSections,
-                    refreshWarning: Self.partialRefreshWarning(failedRefreshLabels)
-                )
-                Self.logRefreshCompletion(snapshot, onLog: onLog)
-                return snapshot
-            }
-
-            if includedSections.contains(.assigned) {
+            if normalizedAuthor == nil && includedSections.contains(.assigned) {
                 var assignedQueriesSucceeded = true
                 do {
                     let assignedResult = try Self.fetchSearch(
@@ -249,7 +202,7 @@ public struct GitHubClient: Sendable {
                 }
             }
 
-            if includedSections.contains(.watched) {
+            if normalizedAuthor == nil && includedSections.contains(.watched) {
                 var watchedHadTransientFailure = false
                 for reference in watchedURLs.prefix(50).compactMap(GitHubPullRequestReference.init(url:)) {
                     let node: PRNode
@@ -289,43 +242,109 @@ public struct GitHubClient: Sendable {
                 }
             }
 
-            for section in customSections.prefix(20) {
-                let trimmedQuery = section.query.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedQuery.isEmpty else { continue }
-                let result: (viewer: String, nodes: [PRNode], hasNextPage: Bool, endCursor: String?)
+            if normalizedAuthor == nil {
+                for section in customSections.prefix(20) {
+                    let trimmedQuery = section.query.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmedQuery.isEmpty else { continue }
+                    let result: (viewer: String, nodes: [PRNode], hasNextPage: Bool, endCursor: String?)
+                    do {
+                        result = try Self.fetchSearch(
+                            executableURL: executableURL,
+                            query: Self.customSearchQuery(trimmedQuery),
+                            count: 50,
+                            logLabel: "Custom — \(section.name)",
+                            onLog: onLog
+                        )
+                    } catch where Self.isTransientGatewayError(error.localizedDescription) {
+                        failedRefreshLabels.append(section.name)
+                        continue
+                    }
+                    viewer = result.viewer
+                    refreshedCustomSectionIDs.insert(section.id)
+                    customSectionResults.append(CustomPRSectionResult(
+                        sectionID: section.id,
+                        pullRequests: Self.makeCustomPullRequests(result.nodes, viewer: result.viewer)
+                    ))
+                    if let onUpdate {
+                        await onUpdate(PRFetchUpdate(
+                            snapshot: Self.makeSnapshot(
+                                viewer: viewer,
+                                watched: watched,
+                                authored: authored,
+                                assigned: assigned,
+                                reviewRequested: reviewRequested,
+                                merged: merged,
+                                customSectionResults: customSectionResults,
+                                includedSections: includedSections
+                            ),
+                            refreshedSections: refreshedSections,
+                            refreshedCustomSectionIDs: [section.id]
+                        ))
+                    }
+                }
+            }
+
+            if includedSections.contains(.drafts) {
                 do {
-                    result = try Self.fetchSearch(
+                    let result = try Self.fetchSearch(
                         executableURL: executableURL,
-                        query: Self.customSearchQuery(trimmedQuery),
+                        query: "is:pr is:open \(authorQualifier) \(Self.authoredSearchQualifier(for: .drafts)) archived:false\(organizationQualifier) sort:updated-desc",
                         count: 50,
-                        logLabel: "Custom — \(section.name)",
+                        logLabel: PRSection.drafts.title,
                         onLog: onLog
                     )
+                    viewer = result.viewer
+                    authored.append(contentsOf: result.nodes)
+                    refreshedSections.insert(.drafts)
+                    if let onUpdate {
+                        await onUpdate(PRFetchUpdate(
+                            snapshot: Self.makeSnapshot(
+                                viewer: viewer,
+                                watched: watched,
+                                authored: authored,
+                                assigned: assigned,
+                                reviewRequested: reviewRequested,
+                                merged: merged,
+                                customSectionResults: customSectionResults,
+                                includedSections: includedSections
+                            ),
+                            refreshedSections: refreshedSections
+                        ))
+                    }
                 } catch where Self.isTransientGatewayError(error.localizedDescription) {
-                    failedRefreshLabels.append(section.name)
-                    continue
+                    failedRefreshLabels.append(PRSection.drafts.title)
                 }
-                viewer = result.viewer
-                refreshedCustomSectionIDs.insert(section.id)
-                customSectionResults.append(CustomPRSectionResult(
-                    sectionID: section.id,
-                    pullRequests: Self.makeCustomPullRequests(result.nodes, viewer: result.viewer)
-                ))
-                if let onUpdate {
-                    await onUpdate(PRFetchUpdate(
-                        snapshot: Self.makeSnapshot(
-                            viewer: viewer,
-                            watched: watched,
-                            authored: authored,
-                            assigned: assigned,
-                            reviewRequested: reviewRequested,
-                            merged: merged,
-                            customSectionResults: customSectionResults,
-                            includedSections: includedSections
-                        ),
-                        refreshedSections: refreshedSections,
-                        refreshedCustomSectionIDs: [section.id]
-                    ))
+            }
+
+            if includedSections.contains(.merged) {
+                do {
+                    let result = try Self.fetchSearch(
+                        executableURL: executableURL,
+                        query: "is:pr is:merged \(authorQualifier) archived:false\(organizationQualifier) sort:updated-desc",
+                        count: 25,
+                        logLabel: PRSection.merged.title,
+                        onLog: onLog
+                    )
+                    viewer = result.viewer
+                    merged = result.nodes
+                    refreshedSections.insert(.merged)
+                    if let onUpdate {
+                        await onUpdate(PRFetchUpdate(
+                            snapshot: Self.makeSnapshot(
+                                viewer: viewer,
+                                watched: watched,
+                                authored: authored,
+                                assigned: assigned,
+                                reviewRequested: reviewRequested,
+                                merged: merged,
+                                customSectionResults: customSectionResults,
+                                includedSections: includedSections
+                            ),
+                            refreshedSections: refreshedSections
+                        ))
+                    }
+                } catch where Self.isTransientGatewayError(error.localizedDescription) {
+                    failedRefreshLabels.append(PRSection.merged.title)
                 }
             }
 
@@ -346,6 +365,10 @@ public struct GitHubClient: Sendable {
             return snapshot
         }.value
     }
+
+    static let priorityAuthoredSectionOrder: [PRSection] = [
+        .failingCI, .readyToMerge, .waitingForCI, .waitingForReview,
+    ]
 
     static func authoredSearchQualifier(for section: PRSection) -> String {
         switch section {

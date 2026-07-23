@@ -6,7 +6,7 @@
 
 prWatcher is a compact native macOS dashboard for the GitHub pull requests that need your attention. It lives comfortably in a corner of the display, talks to GitHub through your existing `gh` CLI login, and keeps useful results visible even when GitHub—or your network—is unavailable.
 
-Current version: **0.4.0**
+Current version: **0.5.0**
 
 Created by **Kristopher Linquist**.
 
@@ -72,6 +72,7 @@ A permission-aware **Merge** button appears on PRs that are ready. **Merge When 
 - Separate refresh intervals are configurable for unlocked and locked/inactive macOS sessions. They default to three and fifteen minutes respectively, and locked polling can be paused entirely.
 - GitHub calls use `gh api graphql`, so prWatcher uses your existing GitHub CLI authentication.
 - Built-in categories use separate, bounded API calls to avoid oversized shared requests.
+- Actionable, Assigned, Watched, and Custom results are fetched before the lower-priority Drafts and Merged sections.
 - Results appear progressively as calls complete, while existing rows stay visible to prevent layout jumps.
 - Previous results remain on screen when an individual category fails.
 - Transient GitHub 502/503/504 gateway errors are retried and summarized without discarding cached data.
@@ -91,6 +92,7 @@ macOS Focus and notification settings still control whether alerts are delivered
 - Remains fully resizable.
 - Can stay above other apps with **Keep window above other apps** in Settings.
 - Can hide its Dock and app-switcher icon while keeping the dashboard window available.
+- Can register itself as a native macOS login item from Settings, including a direct link to approve it in Login Items when required.
 - Shows each PR’s relative opened time, rounded to the minute.
 - Shows the GitHub author on PRs not authored by the signed-in user, including Watched, Custom, Assigned, and teammate rows.
 - Includes a native app icon and a quiet, non-animated refresh status.
