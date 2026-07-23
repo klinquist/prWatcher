@@ -32,6 +32,39 @@ func pendingCIClassification() {
     ) == .waitingForCI)
 }
 
+@Test("A pending non-blocking check does not wait for CI")
+func nonBlockingPendingCIClassification() {
+    #expect(PRClassifier.section(
+        isDraft: false,
+        ciState: "PENDING",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "UNSTABLE"
+    ) == .readyToMerge)
+}
+
+@Test("A pending check that blocks merging waits for CI")
+func blockingPendingCIClassification() {
+    #expect(PRClassifier.section(
+        isDraft: false,
+        ciState: "PENDING",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "BLOCKED"
+    ) == .waitingForCI)
+}
+
+@Test("A failing non-blocking check does not fail CI")
+func nonBlockingFailedCIClassification() {
+    #expect(PRClassifier.section(
+        isDraft: false,
+        ciState: "FAILURE",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "UNSTABLE"
+    ) == .readyToMerge)
+}
+
 @Test("Passing checks without approval wait for review")
 func reviewClassification() {
     #expect(PRClassifier.section(

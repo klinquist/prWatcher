@@ -504,6 +504,7 @@ public struct GitHubClient: Sendable {
       updatedAt
       reviewDecision
       mergeable
+      mergeStateStatus
       state
       viewerCanClose
       viewerCanUpdate
@@ -539,6 +540,7 @@ public struct GitHubClient: Sendable {
           updatedAt
           reviewDecision
           mergeable
+          mergeStateStatus
           state
           viewerCanClose
           viewerCanUpdate
@@ -980,7 +982,8 @@ public struct GitHubClient: Sendable {
                 isDraft: node.isDraft,
                 ciState: state,
                 reviewDecision: node.reviewDecision,
-                mergeable: node.mergeable
+                mergeable: node.mergeable,
+                mergeStateStatus: node.mergeStateStatus
             )
             guard includedSections.contains(section) else { continue }
             pullRequests.append(makePullRequest(node, viewer: viewer, section: section, assignment: nil))
@@ -1042,6 +1045,7 @@ public struct GitHubClient: Sendable {
             reviewDecision: node.reviewDecision,
             ciState: ciState,
             mergeable: node.mergeable,
+            mergeStateStatus: node.mergeStateStatus,
             state: node.state,
             viewerCanClose: node.viewerCanClose ?? false,
             viewerCanUpdate: node.viewerCanUpdate ?? false,

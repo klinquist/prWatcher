@@ -113,6 +113,7 @@ func graphQLSearchArguments() {
     #expect(GitHubClient.graphQLQuery.contains("viewerCanUpdate"))
     #expect(GitHubClient.graphQLQuery.contains("viewerCanEnableAutoMerge"))
     #expect(GitHubClient.graphQLQuery.contains("viewerPermission"))
+    #expect(GitHubClient.graphQLQuery.contains("mergeStateStatus"))
     #expect(GitHubClient.graphQLQuery.contains("after: $after"))
 
     let nextPageArguments = GitHubClient.graphQLArguments(

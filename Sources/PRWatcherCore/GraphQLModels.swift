@@ -109,6 +109,7 @@ struct PRNode: Decodable {
     let updatedAt: String
     let reviewDecision: String?
     let mergeable: String?
+    let mergeStateStatus: String?
     let state: String?
     let viewerCanClose: Bool?
     let viewerCanUpdate: Bool?

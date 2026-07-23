@@ -4,6 +4,12 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-22
+
+### Fixed
+
+- Ignore pending or failing non-blocking checks when classifying Waiting for CI and Failing CI.
+
 ## [0.3.0] - 2026-07-22
 
 ### Added

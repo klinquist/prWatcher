@@ -6,7 +6,7 @@
 
 prWatcher is a compact native macOS dashboard for the GitHub pull requests that need your attention. It lives comfortably in a corner of the display, talks to GitHub through your existing `gh` CLI login, and keeps useful results visible even when GitHub—or your network—is unavailable.
 
-Current version: **0.3.0**
+Current version: **0.3.1**
 
 Created by **Kristopher Linquist**.
 
@@ -16,9 +16,9 @@ The built-in dashboard sections are:
 
 - **Watched** — PRs explicitly added by URL or with **Watch This PR** from any PR’s context menu, including PRs viewed under a teammate. Watched PRs always belong to your **Me** view.
 - **Assigned to me** — PRs authored by someone else where you are assigned or requested as a reviewer. A setting controls whether team review requests are included.
-- **Failing CI** — open, non-draft PRs with failing checks or merge conflicts.
+- **Failing CI** — open, non-draft PRs with merge-blocking failed checks or merge conflicts.
 - **Ready to merge** — open PRs with the required approvals, passing checks, and no merge conflict.
-- **Waiting for CI** — PRs whose checks are still pending.
+- **Waiting for CI** — PRs whose required, merge-blocking checks are still pending; informational checks do not hold a PR here.
 - **Waiting for review** — PRs that still need approval.
 - **Drafts** — your authored draft PRs.
 - **Merged** — your recently merged PRs, ordered by merge time.

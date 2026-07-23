@@ -70,6 +70,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
     public let reviewDecision: String?
     public let ciState: String?
     public let mergeable: String?
+    public let mergeStateStatus: String?
     public let state: String?
     public let viewerCanClose: Bool
     public let viewerCanUpdate: Bool
@@ -91,6 +92,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         reviewDecision: String?,
         ciState: String?,
         mergeable: String?,
+        mergeStateStatus: String? = nil,
         state: String? = nil,
         viewerCanClose: Bool = false,
         viewerCanUpdate: Bool = false,
@@ -111,6 +113,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         self.reviewDecision = reviewDecision
         self.ciState = ciState
         self.mergeable = mergeable
+        self.mergeStateStatus = mergeStateStatus
         self.state = state
         self.viewerCanClose = viewerCanClose
         self.viewerCanUpdate = viewerCanUpdate
@@ -124,7 +127,10 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         if state == "CLOSED" { return "Closed" }
         if let assignment { return assignment.label }
         if mergeable == "CONFLICTING" { return "Merge conflict" }
-        switch ciState {
+        switch PRClassifier.blockingCIState(
+            rollupState: ciState,
+            mergeStateStatus: mergeStateStatus
+        ) {
         case "FAILURE", "ERROR": return "Checks failing"
         case "PENDING", "EXPECTED": return "Checks running"
         default: break
@@ -138,7 +144,15 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
     }
 
     public var statusFingerprint: String {
-        [section.rawValue, String(isDraft), state ?? "", reviewDecision ?? "", ciState ?? "", mergeable ?? ""]
+        [
+            section.rawValue,
+            String(isDraft),
+            state ?? "",
+            reviewDecision ?? "",
+            ciState ?? "",
+            mergeable ?? "",
+            mergeStateStatus ?? ""
+        ]
             .joined(separator: "|")
     }
 
@@ -172,7 +186,8 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
                 isDraft: isDraft,
                 ciState: ciState,
                 reviewDecision: reviewDecision,
-                mergeable: mergeable
+                mergeable: mergeable,
+                mergeStateStatus: mergeStateStatus
             ) == .readyToMerge
     }
 
@@ -195,6 +210,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
             reviewDecision: reviewDecision,
             ciState: ciState,
             mergeable: mergeable,
+            mergeStateStatus: mergeStateStatus,
             state: state,
             viewerCanClose: viewerCanClose,
             viewerCanUpdate: viewerCanUpdate,
