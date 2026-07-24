@@ -70,6 +70,20 @@ public enum PullRequestMergeMethod: String, Hashable, Codable, Sendable {
     }
 }
 
+public enum AutoMergeAttribution: Hashable, Codable, Sendable {
+    case prWatcher
+    case githubUser(String)
+
+    public var label: String {
+        switch self {
+        case .prWatcher:
+            return "Auto-merged by prWatcher"
+        case let .githubUser(login):
+            return "Auto-merged by @\(login)"
+        }
+    }
+}
+
 public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
     public let id: String
     public let number: Int
@@ -91,6 +105,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
     public let viewerCanMerge: Bool
     public let viewerCanEnableAutoMerge: Bool
     public let autoMergeEnabled: Bool
+    public let autoMergeAttribution: AutoMergeAttribution?
     public let preferredMergeMethod: PullRequestMergeMethod?
     public let assignment: AssignmentKind?
     public let section: PRSection
@@ -116,6 +131,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         viewerCanMerge: Bool = false,
         viewerCanEnableAutoMerge: Bool = false,
         autoMergeEnabled: Bool = false,
+        autoMergeAttribution: AutoMergeAttribution? = nil,
         preferredMergeMethod: PullRequestMergeMethod? = .merge,
         assignment: AssignmentKind?,
         section: PRSection
@@ -140,6 +156,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         self.viewerCanMerge = viewerCanMerge
         self.viewerCanEnableAutoMerge = viewerCanEnableAutoMerge
         self.autoMergeEnabled = autoMergeEnabled
+        self.autoMergeAttribution = autoMergeAttribution
         self.preferredMergeMethod = preferredMergeMethod
         self.assignment = assignment
         self.section = section
@@ -149,7 +166,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
         case id, number, title, url, repository, author, isDraft, createdAt, mergedAt
         case updatedAt, reviewDecision, ciState, mergeable, mergeStateStatus, state
         case viewerCanClose, viewerCanUpdate, viewerCanMerge, viewerCanEnableAutoMerge
-        case autoMergeEnabled, preferredMergeMethod, assignment, section
+        case autoMergeEnabled, autoMergeAttribution, preferredMergeMethod, assignment, section
     }
 
     public init(from decoder: Decoder) throws {
@@ -177,6 +194,10 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
             forKey: .viewerCanEnableAutoMerge
         ) ?? false
         autoMergeEnabled = try container.decodeIfPresent(Bool.self, forKey: .autoMergeEnabled) ?? false
+        autoMergeAttribution = try container.decodeIfPresent(
+            AutoMergeAttribution.self,
+            forKey: .autoMergeAttribution
+        )
         preferredMergeMethod = try container.decodeIfPresent(
             PullRequestMergeMethod.self,
             forKey: .preferredMergeMethod
@@ -309,13 +330,17 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
             viewerCanMerge: viewerCanMerge,
             viewerCanEnableAutoMerge: viewerCanEnableAutoMerge,
             autoMergeEnabled: autoMergeEnabled,
+            autoMergeAttribution: autoMergeAttribution,
             preferredMergeMethod: preferredMergeMethod,
             assignment: nil,
             section: .watched
         )
     }
 
-    public func asMerged(at date: Date = Date()) -> PullRequest {
+    public func asMerged(
+        at date: Date = Date(),
+        autoMergeAttribution completedAutoMergeAttribution: AutoMergeAttribution? = nil
+    ) -> PullRequest {
         PullRequest(
             id: id,
             number: number,
@@ -337,6 +362,7 @@ public struct PullRequest: Identifiable, Hashable, Codable, Sendable {
             viewerCanMerge: false,
             viewerCanEnableAutoMerge: false,
             autoMergeEnabled: false,
+            autoMergeAttribution: completedAutoMergeAttribution ?? autoMergeAttribution,
             preferredMergeMethod: preferredMergeMethod,
             assignment: nil,
             section: .merged

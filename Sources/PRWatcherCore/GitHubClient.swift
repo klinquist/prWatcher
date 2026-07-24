@@ -686,7 +686,7 @@ public struct GitHubClient: Sendable {
       viewerCanClose
       viewerCanUpdate
       viewerCanEnableAutoMerge
-      autoMergeRequest { mergeMethod }
+      autoMergeRequest { mergeMethod enabledBy { login } }
       author { login }
       repository {
         nameWithOwner
@@ -730,7 +730,7 @@ public struct GitHubClient: Sendable {
           viewerCanClose
           viewerCanUpdate
           viewerCanEnableAutoMerge
-          autoMergeRequest { mergeMethod }
+          autoMergeRequest { mergeMethod enabledBy { login } }
           author { login }
           repository {
             nameWithOwner
@@ -796,7 +796,7 @@ public struct GitHubClient: Sendable {
           viewerCanClose
           viewerCanUpdate
           viewerCanEnableAutoMerge
-          autoMergeRequest { mergeMethod }
+          autoMergeRequest { mergeMethod enabledBy { login } }
           author { login }
           repository {
             nameWithOwner
@@ -1966,6 +1966,9 @@ public struct GitHubClient: Sendable {
                 || Self.permissionAllowsMerging(node.repository.viewerPermission),
             viewerCanEnableAutoMerge: node.viewerCanEnableAutoMerge ?? false,
             autoMergeEnabled: node.autoMergeRequest != nil,
+            autoMergeAttribution: node.autoMergeRequest?.enabledBy.map {
+                .githubUser($0.login)
+            },
             preferredMergeMethod: preferredMergeMethod,
             assignment: assignment,
             section: section

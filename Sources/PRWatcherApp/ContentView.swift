@@ -538,7 +538,14 @@ private struct PullRequestRow: View {
                                 .foregroundStyle(.tertiary)
                         }
 
-                        if store.isMergeWhenReadyEnabled(pullRequest) {
+                        if let autoMergeAttribution = store.completedAutoMergeAttribution(
+                            for: pullRequest
+                        ) {
+                            Label(autoMergeAttribution.label, systemImage: "bolt.fill")
+                                .font(.caption2.bold())
+                                .foregroundStyle(Color.green)
+                                .help("This pull request was completed using automatic merge.")
+                        } else if store.isMergeWhenReadyEnabled(pullRequest) {
                             Label(
                                 store.usesPollingForMergeWhenReady(pullRequest)
                                     ? "AUTO-MERGE · POLLING"

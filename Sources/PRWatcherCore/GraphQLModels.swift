@@ -224,6 +224,7 @@ struct RepositoryNode: Decodable {
 
 struct AutoMergeRequestNode: Decodable {
     let mergeMethod: String?
+    let enabledBy: LoginNode?
 }
 
 struct LoginConnection: Decodable {

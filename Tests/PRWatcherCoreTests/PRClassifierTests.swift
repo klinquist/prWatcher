@@ -240,7 +240,10 @@ func mergedRepresentation() throws {
         section: .readyToMerge
     )
 
-    let merged = pullRequest.asMerged(at: mergedAt)
+    let merged = pullRequest.asMerged(
+        at: mergedAt,
+        autoMergeAttribution: .prWatcher
+    )
 
     #expect(merged.section == .merged)
     #expect(merged.state == "MERGED")
@@ -252,6 +255,15 @@ func mergedRepresentation() throws {
     #expect(!merged.viewerCanMerge)
     #expect(merged.stateDetail == "Merged")
     #expect(!merged.isReadyToMerge)
+    #expect(merged.autoMergeAttribution == .prWatcher)
+    #expect(merged.autoMergeAttribution?.label == "Auto-merged by prWatcher")
+}
+
+@Test("GitHub auto-merge attribution names the requesting user")
+func githubAutoMergeAttribution() {
+    let attribution = AutoMergeAttribution.githubUser("octocat")
+
+    #expect(attribution.label == "Auto-merged by @octocat")
 }
 
 @Test("Cached PRs from before native auto-merge fields still decode")
@@ -279,6 +291,7 @@ func legacyPullRequestCacheDecoding() throws {
     )
     object.removeValue(forKey: "viewerCanEnableAutoMerge")
     object.removeValue(forKey: "autoMergeEnabled")
+    object.removeValue(forKey: "autoMergeAttribution")
     object.removeValue(forKey: "preferredMergeMethod")
 
     let decoded = try JSONDecoder().decode(
@@ -287,6 +300,7 @@ func legacyPullRequestCacheDecoding() throws {
     )
     #expect(!decoded.viewerCanEnableAutoMerge)
     #expect(!decoded.autoMergeEnabled)
+    #expect(decoded.autoMergeAttribution == nil)
     #expect(decoded.preferredMergeMethod == .merge)
 }
 

@@ -180,6 +180,7 @@ func graphQLSearchArguments() {
     #expect(GitHubClient.graphQLQuery.contains("viewerCanClose"))
     #expect(GitHubClient.graphQLQuery.contains("viewerCanUpdate"))
     #expect(GitHubClient.graphQLQuery.contains("viewerCanEnableAutoMerge"))
+    #expect(GitHubClient.graphQLQuery.contains("enabledBy { login }"))
     #expect(GitHubClient.graphQLQuery.contains("viewerPermission"))
     #expect(GitHubClient.graphQLQuery.contains("mergeStateStatus"))
     #expect(GitHubClient.graphQLQuery.contains("after: $after"))
@@ -465,6 +466,10 @@ func decodeWatchedPullRequest() throws {
             "viewerCanClose": true,
             "viewerCanUpdate": false,
             "viewerCanEnableAutoMerge": true,
+            "autoMergeRequest": {
+              "mergeMethod": "SQUASH",
+              "enabledBy": { "login": "octocat" }
+            },
             "author": { "login": "hubot" },
             "repository": { "nameWithOwner": "acme/widgets", "viewerPermission": "WRITE" },
             "assignees": { "nodes": [] },
@@ -483,6 +488,7 @@ func decodeWatchedPullRequest() throws {
     #expect(node.viewerCanClose == true)
     #expect(node.viewerCanUpdate == false)
     #expect(node.viewerCanEnableAutoMerge == true)
+    #expect(node.autoMergeRequest?.enabledBy?.login == "octocat")
     #expect(node.repository.viewerPermission == "WRITE")
     #expect(node.commits.nodes.compactMap { $0 }.first?.commit.statusCheckRollup?.state == "SUCCESS")
 }

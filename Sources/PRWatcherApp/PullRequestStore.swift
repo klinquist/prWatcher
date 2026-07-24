@@ -102,6 +102,7 @@ final class PullRequestStore: ObservableObject {
     private var cacheGeneration = 0
     private var knownPullRequestIDs: [String: Set<String>] = [:]
     private var mergeWhenReadyInFlight = Set<String>()
+    private var autoMergedByPRWatcherIDs = Set<String>()
     private var quotaDeferredUntil: Date?
 
     init() {
@@ -139,6 +140,9 @@ final class PullRequestStore: ObservableObject {
            ) {
             mergeWhenReadyRegistrations = registrations
         }
+        autoMergedByPRWatcherIDs = Set(
+            UserDefaults.standard.stringArray(forKey: "autoMergedByPRWatcherIDs") ?? []
+        )
         reconcileSectionPreferences()
         if let data = UserDefaults.standard.data(forKey: "knownPullRequestIDs"),
            let known = try? JSONDecoder().decode([String: Set<String>].self, from: data) {
@@ -973,13 +977,24 @@ final class PullRequestStore: ObservableObject {
     }
 
     func isMergeWhenReadyEnabled(_ pullRequest: PullRequest) -> Bool {
-        mergeWhenReadyRegistrations[pullRequest.id] != nil || pullRequest.autoMergeEnabled
+        guard pullRequest.state != "MERGED", pullRequest.mergedAt == nil else { return false }
+        return mergeWhenReadyRegistrations[pullRequest.id] != nil || pullRequest.autoMergeEnabled
     }
 
     func usesPollingForMergeWhenReady(_ pullRequest: PullRequest) -> Bool {
         guard !pullRequest.autoMergeEnabled,
               let registration = mergeWhenReadyRegistrations[pullRequest.id] else { return false }
         return registration.effectiveMode == .pollingFallback
+    }
+
+    func completedAutoMergeAttribution(
+        for pullRequest: PullRequest
+    ) -> AutoMergeAttribution? {
+        guard pullRequest.state == "MERGED" || pullRequest.mergedAt != nil else { return nil }
+        if autoMergedByPRWatcherIDs.contains(pullRequest.id) {
+            return .prWatcher
+        }
+        return pullRequest.autoMergeAttribution
     }
 
     func enableMergeWhenReady(_ pullRequest: PullRequest) {
@@ -1238,6 +1253,16 @@ final class PullRequestStore: ObservableObject {
 
             if pullRequest.state == "CLOSED" || pullRequest.state == "MERGED" || pullRequest.mergedAt != nil {
                 mergeWhenReadyRegistrations.removeValue(forKey: originalRegistration.pullRequestID)
+                if pullRequest.state == "MERGED" || pullRequest.mergedAt != nil {
+                    autoMergedByPRWatcherIDs.insert(originalRegistration.pullRequestID)
+                    saveAutoMergedByPRWatcherIDs()
+                    outcome.mergedPullRequests.append(
+                        pullRequest.asMerged(
+                            at: pullRequest.mergedAt ?? pullRequest.updatedAt,
+                            autoMergeAttribution: .prWatcher
+                        )
+                    )
+                }
                 appendRefreshLog(PRRefreshLogEvent(
                     level: .info,
                     message: "Merge When Ready — \(label): \(pullRequest.state == "CLOSED" ? "the PR was closed" : "the PR was already merged"). Automatic merge monitoring was removed."
@@ -1339,7 +1364,11 @@ final class PullRequestStore: ObservableObject {
             do {
                 try await client.merge(pullRequest)
                 mergeWhenReadyRegistrations.removeValue(forKey: originalRegistration.pullRequestID)
-                outcome.mergedPullRequests.append(pullRequest.asMerged())
+                autoMergedByPRWatcherIDs.insert(originalRegistration.pullRequestID)
+                saveAutoMergedByPRWatcherIDs()
+                outcome.mergedPullRequests.append(
+                    pullRequest.asMerged(autoMergeAttribution: .prWatcher)
+                )
                 appendRefreshLog(PRRefreshLogEvent(
                     level: .success,
                     message: "Merge When Ready — \(label): automatic merge succeeded."
@@ -1473,6 +1502,13 @@ final class PullRequestStore: ObservableObject {
     private func saveMergeWhenReadyRegistrations() {
         guard let data = try? JSONEncoder().encode(mergeWhenReadyRegistrations) else { return }
         UserDefaults.standard.set(data, forKey: "mergeWhenReadyRegistrations")
+    }
+
+    private func saveAutoMergedByPRWatcherIDs() {
+        UserDefaults.standard.set(
+            autoMergedByPRWatcherIDs.sorted(),
+            forKey: "autoMergedByPRWatcherIDs"
+        )
     }
 
     private func reconcileSectionPreferences() {

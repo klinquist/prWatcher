@@ -4,6 +4,12 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-24
+
+### Fixed
+
+- Replace the stale active auto-merge label on merged PRs with durable attribution to prWatcher or the GitHub user who requested native auto-merge.
+
 ## [0.7.0] - 2026-07-23
 
 ### Added
