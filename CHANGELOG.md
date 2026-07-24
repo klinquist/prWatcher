@@ -4,6 +4,12 @@ All notable changes to prWatcher are documented here. Versions follow [Semantic 
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-24
+
+### Fixed
+
+- Honor each repository's allowed merge strategy for manual and polling auto-merges instead of always requesting a merge commit.
+
 ## [0.7.1] - 2026-07-24
 
 ### Fixed

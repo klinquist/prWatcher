@@ -2,6 +2,34 @@ import Foundation
 import Testing
 @testable import PRWatcherCore
 
+@Test("Merge commands use the repository-supported merge method")
+func mergeCommandsUsePreferredMethod() throws {
+    let pullRequest = PullRequest(
+        id: "PR_squash_only",
+        number: 51941,
+        title: "Squash-only repository",
+        url: try #require(URL(string: "https://github.com/acme/widgets/pull/51941")),
+        repository: "acme/widgets",
+        author: "octocat",
+        isDraft: false,
+        mergedAt: nil,
+        updatedAt: Date(),
+        reviewDecision: "APPROVED",
+        ciState: "SUCCESS",
+        mergeable: "MERGEABLE",
+        preferredMergeMethod: .squash,
+        assignment: nil,
+        section: .readyToMerge
+    )
+
+    #expect(try GitHubClient.mergeArguments(for: pullRequest, auto: false) == [
+        "pr", "merge", "https://github.com/acme/widgets/pull/51941", "--squash",
+    ])
+    #expect(try GitHubClient.mergeArguments(for: pullRequest, auto: true) == [
+        "pr", "merge", "https://github.com/acme/widgets/pull/51941", "--auto", "--squash",
+    ])
+}
+
 @Test("Command runner drains output larger than a process pipe")
 func commandRunnerDrainsLargeOutput() throws {
     let data = try GitHubClient.run(
@@ -88,7 +116,12 @@ func decodeSnapshot() throws {
             "reviewDecision": "APPROVED",
             "mergeable": "MERGEABLE",
             "author": { "login": "octocat" },
-            "repository": { "nameWithOwner": "acme/widgets" },
+            "repository": {
+              "nameWithOwner": "acme/widgets",
+              "mergeCommitAllowed": false,
+              "squashMergeAllowed": true,
+              "rebaseMergeAllowed": false
+            },
             "assignees": { "nodes": [] },
             "reviewRequests": { "nodes": [] },
             "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "SUCCESS" } } }] }
@@ -131,6 +164,7 @@ func decodeSnapshot() throws {
 
     let authored = try #require(snapshot.pullRequests.first { $0.id == "PR_author" })
     #expect(authored.section == .readyToMerge)
+    #expect(authored.preferredMergeMethod == .squash)
 
     let assigned = try #require(snapshot.pullRequests.first { $0.id == "PR_team" })
     #expect(assigned.section == .assigned)

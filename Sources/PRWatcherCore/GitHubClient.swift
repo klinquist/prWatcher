@@ -640,14 +640,28 @@ public struct GitHubClient: Sendable {
     }
 
     public func merge(_ pullRequest: PullRequest) async throws {
-        try await runAction(["pr", "merge", pullRequest.url.absoluteString, "--merge"])
+        try await runAction(try Self.mergeArguments(for: pullRequest, auto: false))
     }
 
     public func enableAutoMerge(_ pullRequest: PullRequest) async throws {
-        let method = pullRequest.preferredMergeMethod ?? .merge
-        try await runAction([
-            "pr", "merge", pullRequest.url.absoluteString, "--auto", method.ghFlag,
-        ])
+        try await runAction(try Self.mergeArguments(for: pullRequest, auto: true))
+    }
+
+    static func mergeArguments(
+        for pullRequest: PullRequest,
+        auto: Bool
+    ) throws -> [String] {
+        guard let method = pullRequest.preferredMergeMethod else {
+            throw GitHubClientError.commandFailed(
+                "This repository does not allow any merge method supported by prWatcher."
+            )
+        }
+        var arguments = ["pr", "merge", pullRequest.url.absoluteString]
+        if auto {
+            arguments.append("--auto")
+        }
+        arguments.append(method.ghFlag)
+        return arguments
     }
 
     public func disableAutoMerge(_ pullRequest: PullRequest) async throws {
